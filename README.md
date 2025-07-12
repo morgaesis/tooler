@@ -16,11 +16,14 @@ local storage, and version pinning, freeing you from manual releases page naviga
 
 ## Installation
 
+Run `./install.sh` for automatic installation.
+
 1. **Download:** Save the `tooler.py` script to a directory of your choice (e.g., `~/bin/tooler.py` or `C:\tools\tooler.py`).
 2. **Make Executable (Linux/macOS):**
 
    ```bash
-   chmod +x /path/to/tooler.py
+   mv /path/to/tooler{.py,}
+   chmod +x /path/to/tooler
    ```
 
 3. **Add to PATH:** Add the directory containing `tooler.py` to your system's `PATH` environment variable.
