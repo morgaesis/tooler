@@ -525,8 +525,9 @@ def install_or_update_tool(
         return None
 
     # For 'latest', get the actual tag_name
-    actual_version = release_info.get("tag_name", "unknown")
+    actual_version: str = release_info.get("tag_name", "unknown")
     if version == "latest":
+        actual_version = actual_version.lstrip("v")  # Remove any 'v' prefix
         tool_key = (
             f"{repo_full_name}:v{actual_version}"  # Pin "latest" to exact version
         )
