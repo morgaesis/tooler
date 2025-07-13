@@ -1,9 +1,8 @@
-#!/bin/env python3
+#!/usr/bin/env python3
 
 import os
 import sys
 import json
-from typing import Any, Dict, Union
 import requests
 import shutil
 import tarfile
@@ -13,6 +12,9 @@ import stat
 from datetime import datetime, timedelta
 import argparse
 from tqdm import tqdm  # Minimalistic loading bar
+import logging
+import subprocess  # For executing pip and Python commands
+import tempfile  # For safely handling temporary wheel files
 
 # --- Configuration Constants ---
 APP_NAME = "tooler"
@@ -27,7 +29,35 @@ _USER_CONFIG_DIR = None
 _TOOLER_CONFIG_FILE_PATH = None
 _TOOLER_TOOLS_DIR = None
 
+# --- Logger Setup ---
+logger = logging.getLogger(APP_NAME)
+logger.setLevel(
+    logging.DEBUG
+)  # Internal logger level set to DEBUG to capture all messages
 
+
+class ToolerFormatter(logging.Formatter):
+    FORMATS = {
+        logging.DEBUG: "\033[90mDEBUG> %(message)s\033[0m",  # Gray
+        logging.INFO: "\033[94mINFO> %(message)s\033[0m",  # Blue
+        logging.WARNING: "\033[93mWARN> %(message)s\033[0m",  # Yellow
+        logging.ERROR: "\033[91mERROR> %(message)s\033[0m",  # Red
+        logging.CRITICAL: "\033[91mCRIT> %(message)s\033[0m",  # Red
+    }
+
+    def format(self, record):
+        log_fmt = self.FORMATS.get(record.levelno)
+        # Apply color only if output is a TTY
+        if sys.stderr.isatty():
+            formatter = logging.Formatter(log_fmt)
+        else:
+            formatter = logging.Formatter(
+                "%(levelname)s> %(message)s"
+            )  # No colors if not TTY
+        return formatter.format(record)
+
+
+# --- Global Functions (Lazy Initialization for Paths) ---
 def get_user_data_dir():
     """Determines the user-specific data directory."""
     global _USER_DATA_DIR
@@ -95,19 +125,16 @@ def load_tool_configs():
     try:
         with open(config_path, "r") as f:
             config = json.load(f)
-            # Ensure 'tools' and 'settings' keys exist, initialize if not
             if "tools" not in config:
                 config["tools"] = {}
             if "settings" not in config:
                 config["settings"] = {"update_check_days": DEFAULT_UPDATE_CHECK_DAYS}
             elif "update_check_days" not in config["settings"]:
                 config["settings"]["update_check_days"] = DEFAULT_UPDATE_CHECK_DAYS
-
             return config
     except json.JSONDecodeError:
-        print(
-            f"Error: Could not parse config file at {config_path}. It might be corrupted. Starting with an empty config.",
-            file=sys.stderr,
+        logger.error(
+            f"Could not parse config file at {config_path}. It might be corrupted. Starting with an empty config."
         )
         return {
             "tools": {},
@@ -118,7 +145,7 @@ def load_tool_configs():
 def save_tool_configs(configs):
     """Saves tool configurations to the JSON file."""
     config_path = get_tooler_config_file_path()
-    os.makedirs(os.path.dirname(config_path), exist_ok=True)  # Ensure config dir exists
+    os.makedirs(os.path.dirname(config_path), exist_ok=True)
     with open(config_path, "w") as f:
         json.dump(configs, f, indent=2)
 
@@ -147,9 +174,8 @@ def get_system_arch():
         elif "x86_64" in machine or "amd64" in machine:
             return "amd64"
         elif "x86" in machine:
-            return "386"  # Or sometimes "x86" is used
+            return "386"
 
-    # Fallback for unknown/uncommon architectures
     return machine
 
 
@@ -157,14 +183,13 @@ def map_arch_to_github_release(arch, system):
     """Maps internal arch/system to common GitHub release file naming conventions."""
     system = system.lower()
 
-    # Common mappings
     if system == "linux":
         if arch == "amd64":
             return "linux_amd64"
         if arch == "arm64":
             return "linux_arm64"
         if arch == "arm":
-            return "linux_arm"  # Less common for new tools, but good to have
+            return "linux_arm"
         if arch == "386":
             return "linux_386"
     elif system == "darwin":
@@ -178,9 +203,8 @@ def map_arch_to_github_release(arch, system):
         if arch == "arm64":
             return "windows_arm64"
         if arch == "386":
-            return "windows_386"  # Unlikely for act, but for generic
+            return "windows_386"
 
-    # Common alternate patterns if direct match fails
     if arch == "amd64":
         return (
             f"{system}_x86_64",
@@ -204,7 +228,6 @@ def find_asset_for_platform(assets, tool_name, system_arch, system_os):
     """
     system_os_lower = system_os.lower()
 
-    # Get common naming conventions for our platform
     possible_arch_patterns = [
         f"{system_os_lower}_{system_arch}",
         f"{system_os_lower}-{system_arch}",
@@ -216,26 +239,21 @@ def find_asset_for_platform(assets, tool_name, system_arch, system_os):
         else:
             possible_arch_patterns.extend(mapped_patterns)
 
-    # Add common general patterns
     if system_os_lower == "windows":
-        possible_arch_patterns.append("windows")  # For simple .exe files
+        possible_arch_patterns.append("windows")
     elif system_os_lower == "darwin":
         possible_arch_patterns.append("macos")
 
-    # Remove duplicates and ensure longer patterns are checked first
     possible_arch_patterns = sorted(
         list(set(possible_arch_patterns)), key=len, reverse=True
     )
 
-    print(
-        f"  Info: Searching for assets matching {system_os_lower} and {system_arch}",
-        file=sys.stderr,
-    )
-    print(f"  Info: Potential patterns: {possible_arch_patterns}", file=sys.stderr)
+    logger.debug(f"Searching for assets matching {system_os_lower} and {system_arch}")
+    logger.debug(f"Potential patterns: {possible_arch_patterns}")
 
     best_asset = None
 
-    # Prioritize archives
+    # Priority 1: Archives
     for pattern in possible_arch_patterns:
         for asset in assets:
             asset_name_lower = asset["name"].lower()
@@ -246,77 +264,99 @@ def find_asset_for_platform(assets, tool_name, system_arch, system_os):
                         and ".zip" not in best_asset["name"].lower()
                     ):
                         best_asset = asset
-                        print(
-                            f"  Found potential archive asset: {asset['name']}",
-                            file=sys.stderr,
-                        )
-                        break  # Found a good one, move to next pattern (or break outerloop if it's the best)
+                        logger.debug(f"Found potential archive asset: {asset['name']}")
+                        break
         if best_asset and (
             ".tar.gz" in best_asset["name"].lower()
             or ".zip" in best_asset["name"].lower()
         ):
-            break  # Found a highly preferred archive, let's stick with it
+            break
 
-    # Then prioritize uncompressed binaries if no suitable archive found
+    # Priority 2: Direct executables (if no suitable archive found)
     if best_asset is None:
         for pattern in possible_arch_patterns:
             for asset in assets:
                 asset_name_lower = asset["name"].lower()
-                # Exclude archives as we already checked those
                 if (
                     pattern in asset_name_lower
                     and ".tar.gz" not in asset_name_lower
                     and ".zip" not in asset_name_lower
+                    and ".whl" not in asset_name_lower
+                    and ".tar" not in asset_name_lower
                 ):
-                    # Check for direct executable names like 'act' or 'act.exe'
-                    if (
-                        tool_name.lower() in os.path.splitext(asset_name_lower)[0]
-                    ):  # e.g. 'act' in 'act_linux_amd64'
+                    if tool_name.lower() in os.path.splitext(asset_name_lower)[0]:
                         if system_os_lower == "windows" and asset_name_lower.endswith(
                             ".exe"
                         ):
                             best_asset = asset
-                            print(
-                                f"  Found potential executable asset: {asset['name']}",
-                                file=sys.stderr,
+                            logger.debug(
+                                f"Found potential executable asset: {asset['name']}"
                             )
                             break
                         elif (
                             system_os_lower != "windows"
                             and not asset_name_lower.endswith(".exe")
-                        ):  # Prefer non-.exe for non-Windows
+                        ):
                             best_asset = asset
-                            print(
-                                f"  Found potential executable asset: {asset['name']}",
-                                file=sys.stderr,
+                            logger.debug(
+                                f"Found potential executable asset: {asset['name']}"
                             )
                             break
             if best_asset:
-                break  # Found a good one, break out
+                break
+
+    # Priority 3: Python wheels/source (lowest priority)
+    if best_asset is None:
+        for asset in assets:
+            asset_name_lower = asset["name"].lower()
+            if tool_name.lower() in asset_name_lower:
+                if ".whl" in asset_name_lower:
+                    logger.info(f"Detected Python wheel asset: {asset['name']}")
+                    best_asset = asset
+                    break
+                elif ".tar.gz" in asset_name_lower and (
+                    "source" in asset_name_lower or "src" in asset_name_lower
+                ):
+                    logger.info(
+                        f"Detected Python source distribution (.tar.gz): {asset['name']}"
+                    )
+                    if not best_asset:
+                        best_asset = asset
 
     if best_asset:
         return best_asset["browser_download_url"], best_asset["name"]
 
-    print("  Error: No suitable asset found for your platform.", file=sys.stderr)
-    print(f"  Available assets: {[a['name'] for a in assets]}", file=sys.stderr)
+    logger.debug(
+        "No pre-packaged asset found. Checking if this is a known direct-to-PyPI tool."
+    )
+    known_pypi_tools = ["adrienverge/yamllint"]
+    if any(repo.endswith(f"/{tool_name}") for repo in known_pypi_tools):
+        logger.info(
+            f"Tool `{tool_name}` is a known Python tool. Will install directly from PyPI."
+        )
+        return "PyPI", f"{tool_name}-from-pypi"
+
+    logger.error("No suitable asset found for your platform.")
+    logger.error(f"Available assets: {[a['name'] for a in assets]}")
     return None, None
 
 
 # --- Download and Extraction ---
 def download_file(url, local_path):
     """Downloads a file with a minimalistic progress bar."""
-    print(f"  Downloading {os.path.basename(local_path)}...", file=sys.stderr)
+    logger.info(f"Downloading {os.path.basename(local_path)}...")
     try:
         response = requests.get(url, stream=True)
         response.raise_for_status()
         total_size_in_bytes = int(response.headers.get("content-length", 0))
-        block_size = 8192  # 8 Kibibytes
+        block_size = 8192
         progress_bar = tqdm(
             total=total_size_in_bytes,
             unit="iB",
             unit_scale=True,
             desc="    Progress",
             file=sys.stderr,
+            disable=logger.level > logging.INFO,
         )
         with open(local_path, "wb") as file:
             for data in response.iter_content(block_size):
@@ -324,67 +364,63 @@ def download_file(url, local_path):
                 file.write(data)
         progress_bar.close()
         if total_size_in_bytes != 0 and progress_bar.n != total_size_in_bytes:
-            print("  Warning: Download size mismatch.", file=sys.stderr)
+            logger.warning("Download size mismatch.")
         return True
     except requests.exceptions.RequestException as e:
-        print(f"  Error downloading {url}: {e}", file=sys.stderr)
+        logger.error(f"Error downloading {url}: {e}")
         return False
 
 
 def extract_archive(archive_path, extract_dir):
     """Extracts a tar.gz or zip archive."""
-    print(
-        f"  Extracting {os.path.basename(archive_path)} to {extract_dir}...",
-        file=sys.stderr,
-    )
+    logger.info(f"Extracting {os.path.basename(archive_path)} to {extract_dir}...")
     try:
         if archive_path.endswith(".tar.gz"):
             with tarfile.open(archive_path, "r:gz") as tar:
-                # Security check: prevent path traversal
+                # Security check for path traversal
                 for member in tar.getmembers():
-                    if (
-                        member.issym() or member.islnk()
-                    ):  # Skip symbolic/hard links for safety
-                        continue
-                    if os.path.isabs(member.name) or ".." in member.name:
-                        print(
-                            f"    Warning: Skipping potentially malicious path in tar: {member.name}",
-                            file=sys.stderr,
+                    member_path = os.path.join(extract_dir, member.name)
+                    if not os.path.realpath(member_path).startswith(
+                        os.path.realpath(extract_dir)
+                    ):
+                        logger.warning(
+                            f"Skipping potentially malicious path in tar: {member.name}"
                         )
+                        continue
+                    if member.issym() or member.islnk():
+                        logger.warning(f"Skipping symbolic/hard link: {member.name}")
                         continue
                     tar.extract(member, path=extract_dir)
         elif archive_path.endswith(".zip"):
             with zipfile.ZipFile(archive_path, "r") as zip_ref:
-                # Security check: prevent path traversal
                 for member in zip_ref.infolist():
-                    if member.is_dir():
-                        continue  # Skip directories
-                    if os.path.isabs(member.filename) or ".." in member.filename:
-                        print(
-                            f"    Warning: Skipping potentially malicious path in zip: {member.filename}",
-                            file=sys.stderr,
+                    member_path = os.path.join(extract_dir, member.filename)
+                    if not os.path.realpath(member_path).startswith(
+                        os.path.realpath(extract_dir)
+                    ):
+                        logger.warning(
+                            f"Skipping potentially malicious path in zip: {member.filename}"
                         )
+                        continue
+                    if member.is_dir():
                         continue
                     zip_ref.extract(member, path=extract_dir)
         elif archive_path.endswith(".exe") and platform.system() == "Windows":
-            # This is a direct executable, no extraction needed.
-            # We'll just move/rename it later.
-            print(
-                "  File is a direct executable (.exe), no archive extraction needed.",
-                file=sys.stderr,
+            logger.info(
+                "File is a direct executable (.exe), no archive extraction needed."
             )
             return True
         else:
-            print(
-                f"  Error: Unsupported archive format: {archive_path}", file=sys.stderr
+            logger.error(
+                f"Unsupported archive format for direct extraction: {archive_path}"
             )
             return False
         return True
     except (tarfile.TarError, zipfile.BadZipFile) as e:
-        print(f"  Error extracting archive {archive_path}: {e}", file=sys.stderr)
+        logger.error(f"Error extracting archive {archive_path}: {e}")
         return False
     except Exception as e:
-        print(f"  An unexpected error occurred during extraction: {e}", file=sys.stderr)
+        logger.error(f"An unexpected error occurred during extraction: {e}")
         return False
 
 
@@ -395,7 +431,6 @@ def find_executable_in_extracted(extract_dir, required_tool_name, os_system):
     """
     candidates = []
 
-    # Prefer exact match (case-insensitive) or common variants
     target_names = [required_tool_name.lower()]
     if os_system == "windows":
         target_names.append(f"{required_tool_name.lower()}.exe")
@@ -403,30 +438,27 @@ def find_executable_in_extracted(extract_dir, required_tool_name, os_system):
     for root, _, files in os.walk(extract_dir):
         for file in files:
             full_path = os.path.join(root, file)
-            # Check if it's executable (on Unix-like systems) or has .exe on Windows
             if system_is_executable(full_path, os_system):
                 relative_path = os.path.relpath(full_path, extract_dir)
 
-                # Assign a score: Higher is better
                 score = 0
                 file_lower = file.lower()
 
                 if file_lower in target_names:
-                    score += 100  # Exact name match
+                    score += 100
                 elif os.path.splitext(file_lower)[0] in target_names:
-                    score += 90  # Name match ignoring extension
+                    score += 90
                 elif required_tool_name.lower() in file_lower:
-                    score += 50  # Contains tool name
+                    score += 50
 
-                # Prioritize files closer to the root of the extraction
-                score -= relative_path.count(os.sep) * 10  # Penalize for being deeper
+                score -= relative_path.count(os.sep) * 10
 
                 candidates.append((score, full_path))
 
-    candidates.sort(key=lambda x: x[0], reverse=True)  # Sort by score, descending
+    candidates.sort(key=lambda x: x[0], reverse=True)
 
     if candidates:
-        print(f"  Found executable candidate: {candidates[0][1]}", file=sys.stderr)
+        logger.debug(f"Found executable candidate: {candidates[0][1]}")
         return candidates[0][1]
 
     return None
@@ -435,65 +467,178 @@ def find_executable_in_extracted(extract_dir, required_tool_name, os_system):
 def system_is_executable(filepath, os_system):
     """Checks if a file is executable on the current system."""
     if os_system == "windows":
-        return filepath.lower().endswith(".exe")
+        return filepath.lower().endswith(".exe") and os.path.isfile(filepath)
     return os.path.isfile(filepath) and os.access(filepath, os.X_OK)
+
+
+# --- Python Tool Setup ---
+def install_python_tool(
+    tool_configs,
+    tool_name,
+    pypi_package_name,
+    version,
+    tool_dir,
+    download_path,
+    asset_name,
+):
+    """
+    Sets up a Python virtual environment and installs the specified Python package.
+    `pypi_package_name` is the name used on PyPI (e.g., 'yamllint').
+    Returns the path to the shim executable.
+    """
+    logger.info(f"Setting up Python environment for {tool_name} {version}...")
+    venv_path = os.path.join(tool_dir, ".venv")
+
+    try:
+        # Create a virtual environment
+        subprocess.run(
+            [sys.executable, "-m", "venv", venv_path], check=True, capture_output=True
+        )
+        # Upgrade pip within the venv
+        pip_exec = (
+            os.path.join(venv_path, "bin", "pip")
+            if platform.system() != "Windows"
+            else os.path.join(venv_path, "Scripts", "pip.exe")
+        )
+        subprocess.run(
+            [pip_exec, "install", "--upgrade", "pip"], check=True, capture_output=True
+        )
+        logger.debug(f"Created and upgraded pip in virtual environment at {venv_path}")
+    except subprocess.CalledProcessError as e:
+        logger.error(
+            f"Failed to create virtual environment or upgrade pip: {e.stderr.decode()}"
+        )
+        return None
+    except FileNotFoundError:
+        logger.error(
+            f"Python interpreter '{sys.executable}' or 'venv' module not found. Is Python installed correctly?"
+        )
+        return None
+
+    # Determine paths within the venv
+    pip_exec = (
+        os.path.join(venv_path, "bin", "pip")
+        if platform.system() != "Windows"
+        else os.path.join(venv_path, "Scripts", "pip.exe")
+    )
+
+    # 2. Install the Python package using pip
+    install_target = ""
+    if download_path and asset_name.endswith(".whl"):
+        install_target = download_path
+        logger.info(
+            f"Installing local wheel {os.path.basename(download_path)} into virtual environment..."
+        )
+    else:  # Fallback to PyPI install
+        install_target = (
+            f"{pypi_package_name}=={version.lstrip('v')}"
+            if version != "latest"
+            else pypi_package_name
+        )
+        logger.info(
+            f"Installing {pypi_package_name} from PyPI into virtual environment..."
+        )
+
+    if not install_target:
+        logger.error("No valid installation target for Python tool identified.")
+        return None
+
+    try:
+        install_cmd = [pip_exec, "install", "--force-reinstall", install_target]
+        result = subprocess.run(
+            install_cmd, check=True, capture_output=True, text=True
+        )  # text=True for cleaner output
+        logger.debug(f"Pip install stdout:\n{result.stdout}")
+        if result.stderr:
+            logger.debug(f"Pip install stderr:\n{result.stderr}")
+        logger.info(f"Successfully installed {pypi_package_name} {version} via pip.")
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Failed to install Python package '{install_target}': {e.stderr}")
+        return None
+
+    # 3. Create the shim script
+    shim_name = tool_name
+    shim_path_base = os.path.join(tool_dir, shim_name)
+
+    if platform.system() == "Windows":
+        shim_content = f"""@echo off
+set "VENV_PATH=%~dp0\\.venv"
+set "PATH=%VENV_PATH%\\Scripts;%PATH%"
+"%VENV_PATH%\\Scripts\\{tool_name}.exe" %*
+if errorlevel 1 exit /b %errorlevel%
+"""
+        shim_path = shim_path_base + ".bat"
+    else:
+        shim_content = f"""#!/bin/sh
+# This shim activates the virtual environment and runs the tool.
+VENV_PATH="$( cd "$( dirname "$0" )" && pwd )/.venv"
+. "$VENV_PATH/bin/activate"
+exec "$VENV_PATH/bin/{tool_name}" "$@"
+"""
+        shim_path = shim_path_base
+
+    try:
+        with open(shim_path, "w") as f:
+            f.write(shim_content)
+        if platform.system() != "Windows":
+            os.chmod(
+                shim_path,
+                os.stat(shim_path).st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH,
+            )
+        logger.info(f"Created shim script at {shim_path}")
+    except Exception as e:
+        logger.error(f"Failed to create shim script at {shim_path}: {e}")
+        return None
+
+    return shim_path
 
 
 # --- Main Tooler Logic ---
 def get_gh_release_info(repo_full_name, version=None):
     """Fetches GitHub release information."""
-    if version and version.startswith("v"):  # Try direct tag lookup first
+    if version and version.startswith("v"):
         url = f"https://api.github.com/repos/{repo_full_name}/releases/tags/{version}"
     elif version == "latest":
         url = f"https://api.github.com/repos/{repo_full_name}/releases/latest"
-    elif version:  # Assume it's a specific tag not starting with 'v' or a commit hash
-        url = f"https://api.github.com/repos/{repo_full_name}/commits/{version}"  # This is for a commit hash, not a release.
-        print(
-            f"  Warning: Specific commit hash or non-'v' versioning is not directly supported for releases via GitHub API. Trying releases/tags/{version}",
-            file=sys.stderr,
+    elif version:
+        logger.warning(
+            f"Specific version reference '{version}' is not 'latest' and doesn't start with 'v'. "
+            "Assuming it's a tag name and attempting to fetch as a release tag."
         )
         url = f"https://api.github.com/repos/{repo_full_name}/releases/tags/{version}"
-    else:  # Default to latest if no version specified
+    else:
         url = f"https://api.github.com/repos/{repo_full_name}/releases/latest"
 
-    print(f"  Fetching GitHub release info from: {url}", file=sys.stderr)
-    response: Union[requests.Response, None] = None
+    logger.debug(f"Fetching GitHub release info from: {url}")
+    response = None
     try:
         headers = {"Accept": "application/vnd.github.v3+json"}
-        # Check for GitHub token in environment for higher rate limits
         if os.environ.get("GITHUB_TOKEN"):
             headers["Authorization"] = f"token {os.environ['GITHUB_TOKEN']}"
-            print("  (Using GITHUB_TOKEN for API requests)", file=sys.stderr)
+            logger.debug("Using GITHUB_TOKEN for API requests.")
 
         response = requests.get(url, headers=headers)
-        response.raise_for_status()  # Raise an HTTPError for bad responses (4xx or 5xx)
+        response.raise_for_status()
         return response.json()
     except requests.exceptions.RequestException as e:
-        print(
-            f"  Error fetching GitHub release info for {repo_full_name}@{version or 'latest'}: {e}",
-            file=sys.stderr,
+        logger.error(
+            f"Error fetching GitHub release info for {repo_full_name}@{version or 'latest'}: {e}"
         )
         if response is None:
-            print(
-                f"  (Hint: Try including 'v' (e.g., 'v{version}') if it's a version tag.)",
-            )
+            logger.error("No response received from GitHub API.")
         elif response.status_code == 404:
             if version and not version.startswith("v"):
-                print(
-                    f"  Hint: Tag '{version}' not found. Try including 'v' (e.g., 'v{version}') if it's a version tag.",
-                    file=sys.stderr,
+                logger.error(
+                    f"Tag '{version}' not found. Try including 'v' (e.g., 'v{version}') if it's a version tag, or ensure it's a published release."
                 )
             elif version:
-                print(
-                    f"  Hint: Tag '{version}' not found. It might be a pre-release or not a formal GitHub release.",
-                    file=sys.stderr,
+                logger.error(
+                    f"Tag '{version}' not found. It might be a pre-release or not a formal GitHub release."
                 )
         elif response.status_code == 403 and "ratelimit" in str(e).lower():
-            print(
-                "  Rate limit exceeded. Set GITHUB_TOKEN environment variable for higher limits.",
-                file=sys.stderr,
+            logger.error(
+                "GitHub API rate limit exceeded. Set GITHUB_TOKEN environment variable for higher limits."
             )
-
         return None
 
 
@@ -501,296 +646,291 @@ def install_or_update_tool(
     tool_configs, tool_name, repo_full_name, version="latest", force_update=False
 ):
     """
-    Downloads and prepares a tool.
-    Returns the path to the executable or None on failure.
+    Downloads and prepares a tool. Central logic for binary and Python installations.
     """
     system_os = platform.system()
     system_arch = get_system_arch()
 
-    # Derive tool binary name from repository name
-    _tool_binary_name = repo_full_name.split("/")[-1]  # e.g., 'act' from 'nektos/act'
-
-    # Check if a specific version is requested, otherwise use the pinned/latest
-    requested_version_string = f":v{version}" if version and version != "latest" else ""
-    tool_key = f"{repo_full_name}{requested_version_string}"
-
-    current_tool_info = tool_configs["tools"].get(tool_key)
+    _tool_binary_name = repo_full_name.split("/")[-1]
 
     release_info = get_gh_release_info(repo_full_name, version)
     if not release_info:
-        print(
-            f"  Failed to get release info for {tool_key}. Cannot install/update.",
-            file=sys.stderr,
+        logger.error(
+            f"Failed to get release info for {repo_full_name}. Cannot install/update."
         )
         return None
 
-    # For 'latest', get the actual tag_name
-    actual_version: str = release_info.get("tag_name", "unknown")
-    if version == "latest":
-        actual_version = actual_version.lstrip("v")  # Remove any 'v' prefix
-        tool_key = (
-            f"{repo_full_name}:v{actual_version}"  # Pin "latest" to exact version
+    actual_version = release_info.get(
+        "tag_name", version if version != "latest" else "unknown"
+    )
+    if actual_version == "unknown":
+        logger.error(
+            "Could not determine actual version from GitHub release. Cannot proceed."
         )
+        return None
 
-    # Re-check current tool info with the definitive key
+    if version == "latest":
+        tool_key = f"{repo_full_name}:v{actual_version}"
+    else:
+        tool_key = f"{repo_full_name}:{version}"
+
     current_tool_info = tool_configs["tools"].get(tool_key)
 
-    # Determine unique directory for this tool and version
     tool_dir = os.path.join(
         get_tooler_tools_dir(), f"{repo_full_name.replace('/', '__')}", actual_version
     )
-    expected_executable_path = "NOT_YET_DETERMINED"  # Will be set after extraction
 
-    # Check for existing installation
     if (
         current_tool_info
         and current_tool_info.get("version") == actual_version
         and not force_update
     ):
-        if os.path.exists(current_tool_info.get("executable_path")):
-            # Validate if executable is still there
-            if system_is_executable(current_tool_info["executable_path"], system_os):
-                print(
-                    f"  Tool {tool_name} {actual_version} already installed and up-to-date at {current_tool_info['executable_path']}",
-                    file=sys.stderr,
-                )
-                # Update last accessed for pinning purposes
-                tool_configs["tools"][tool_key]["last_accessed"] = (
-                    datetime.now().isoformat()
-                )
-                save_tool_configs(tool_configs)
-                return current_tool_info["executable_path"]
-            else:
-                print(
-                    f"  Warning: Executable for {tool_name} {actual_version} missing or not executable at {current_tool_info['executable_path']}. Re-installing.",
-                    file=sys.stderr,
-                )
-                # Fall through to re-installation
-        else:
-            print(
-                f"  Warning: Installation directory for {tool_name} {actual_version} missing. Re-installing.",
-                file=sys.stderr,
+        if os.path.exists(
+            current_tool_info.get("executable_path")
+        ) and system_is_executable(current_tool_info["executable_path"], system_os):
+            logger.info(
+                f"Tool {tool_name} {actual_version} is already installed and up-to-date."
             )
-            # Fall through to re-installation
+            tool_configs["tools"][tool_key]["last_accessed"] = (
+                datetime.now().isoformat()
+            )
+            save_tool_configs(tool_configs)
+            return current_tool_info["executable_path"]
+        else:
+            logger.warning(
+                f"Tool installation for {tool_name} {actual_version} is corrupted. Re-installing."
+            )
 
-    # Proceed with installation/update
-    print(f"  Installing/Updating {tool_name} {actual_version}...", file=sys.stderr)
+    logger.info(f"Installing/Updating {tool_name} {actual_version}...")
 
     download_url, asset_name = find_asset_for_platform(
         release_info.get("assets", []), _tool_binary_name, system_arch, system_os
     )
 
-    if not download_url:
-        print(
-            f"  Error: No suitable release asset found for {system_os} {system_arch} for {tool_key}.",
-            file=sys.stderr,
-        )
-        return None
+    is_pypi_install = download_url == "PyPI"
+    is_wheel_install = asset_name and asset_name.endswith(".whl")
 
-    temp_download_path = os.path.join(
-        get_tooler_tools_dir(),
-        f"temp_{_tool_binary_name}_{actual_version}_{os.path.basename(download_url)}",
-    )
-
-    if not download_file(download_url, temp_download_path):
-        return None
-
-    # Clear previous version's directory if it exists
     if os.path.exists(tool_dir):
-        print(f"  Clearing old installation directory: {tool_dir}", file=sys.stderr)
+        logger.info(f"Clearing old installation directory: {tool_dir}")
         try:
             shutil.rmtree(tool_dir)
         except OSError as e:
-            print(
-                f"  Error removing old directory {tool_dir}: {e}. Please remove manually if issues persist.",
-                file=sys.stderr,
+            logger.error(
+                f"Error removing old directory {tool_dir}: {e}. Please remove manually if issues persist."
             )
             return None
-
     os.makedirs(tool_dir, exist_ok=True)
 
-    if asset_name.endswith(".tar.gz") or asset_name.endswith(".zip"):
-        if not extract_archive(temp_download_path, tool_dir):
-            if os.path.exists(tool_dir):
-                shutil.rmtree(tool_dir)  # Cleanup broken install
-            os.remove(temp_download_path)
-            return None
+    executable_path = None
+    install_type = "binary"
 
-        # Find the executable inside the extracted directory
-        expected_executable_path = find_executable_in_extracted(
-            tool_dir, _tool_binary_name, system_os
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_download_path: str | None = None
+        if is_pypi_install:
+            install_type = "python-venv"
+        elif download_url:
+            if is_wheel_install:
+                temp_download_path = os.path.join(temp_dir, asset_name)
+            else:
+                temp_download_filename = os.path.basename(download_url).split("?")[0]
+                temp_download_path = os.path.join(
+                    temp_dir,
+                    f"temp_{_tool_binary_name}_{actual_version}_{temp_download_filename}",
+                )
+
+            if not download_file(download_url, temp_download_path):
+                return None
+
+        # --- Installation Logic ---
+        if is_pypi_install or is_wheel_install:
+            install_type = "python-venv"
+            executable_path = install_python_tool(
+                tool_configs,
+                tool_name,
+                tool_name,
+                actual_version,
+                tool_dir,
+                temp_download_path,
+                asset_name,
+            )
+        elif asset_name.endswith(".tar.gz") or asset_name.endswith(".zip"):
+            if temp_download_path and not extract_archive(temp_download_path, tool_dir):
+                return None
+            executable_path = find_executable_in_extracted(
+                tool_dir, _tool_binary_name, system_os
+            )
+        else:  # Direct executable
+            executable_filename = (
+                f"{_tool_binary_name}.exe"
+                if system_os == "Windows"
+                else _tool_binary_name
+            )
+            move_target_path = os.path.join(tool_dir, executable_filename)
+            if temp_download_path:  # FIX IS HERE
+                try:
+                    shutil.move(temp_download_path, move_target_path)
+                    executable_path = move_target_path
+                except shutil.Error as e:
+                    logger.error(f"Error moving downloaded file: {e}")
+                    return None
+            else:
+                logger.error(
+                    "Internal Error: No temporary download path available for moving."
+                )
+                return None
+
+    # --- Post-installation steps ---
+    if executable_path:
+        if system_os != "Windows" and install_type == "binary":
+            try:
+                os.chmod(
+                    executable_path,
+                    os.stat(executable_path).st_mode
+                    | stat.S_IXUSR
+                    | stat.S_IXGRP
+                    | stat.S_IXOTH,
+                )
+                logger.info(f"Set executable permissions for {executable_path}")
+            except OSError as e:
+                logger.warning(
+                    f"Could not set executable permissions for {executable_path}: {e}"
+                )
+
+        tool_configs["tools"][tool_key] = {
+            "tool_name": tool_name.lower(),
+            "repo": repo_full_name,
+            "version": actual_version,
+            "executable_path": executable_path,
+            "installed_at": datetime.now().isoformat(),
+            "last_accessed": datetime.now().isoformat(),
+            "install_type": install_type,
+        }
+        save_tool_configs(tool_configs)
+
+        logger.info(
+            f"Successfully installed {tool_name} {actual_version} at {executable_path}"
         )
-        if not expected_executable_path:
-            print(
-                f"  Error: Could not find executable in {tool_dir} after extraction for {tool_key}.",
-                file=sys.stderr,
-            )
-            if os.path.exists(tool_dir):
-                shutil.rmtree(tool_dir)
-            os.remove(temp_download_path)
-            return None
-    else:  # Assume it's a direct executable asset
-        executable_filename = (
-            f"{_tool_binary_name}.exe" if system_os == "Windows" else _tool_binary_name
+        return executable_path
+    else:
+        logger.error(
+            f"Installation failed. No executable path was determined for {tool_name} {actual_version}."
         )
-        expected_executable_path = os.path.join(tool_dir, executable_filename)
-        try:
-            shutil.move(temp_download_path, expected_executable_path)
-        except shutil.Error as e:
-            print(f"  Error moving downloaded file: {e}", file=sys.stderr)
-            if os.path.exists(tool_dir):
-                shutil.rmtree(tool_dir)
-            os.remove(temp_download_path)
-            return None
-
-    # Ensure executable permissions on Unix-like systems
-    if system_os != "Windows":
-        try:
-            current_mode = os.stat(expected_executable_path).st_mode
-            os.chmod(
-                expected_executable_path,
-                current_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH,
-            )
-            print(
-                f"  Set executable permissions for {expected_executable_path}",
-                file=sys.stderr,
-            )
-        except OSError as e:
-            print(
-                f"  Warning: Could not set executable permissions for {expected_executable_path}: {e}",
-                file=sys.stderr,
-            )
-
-    # Clean up temp archive
-    if os.path.exists(temp_download_path):
-        os.remove(temp_download_path)
-
-    # Update configurations
-    tool_configs["tools"][tool_key] = {
-        "tool_name": tool_name.lower(),  # Store canonical common name
-        "repo": repo_full_name,
-        "version": actual_version,
-        "executable_path": expected_executable_path,
-        "installed_at": datetime.now().isoformat(),
-        "last_accessed": datetime.now().isoformat(),
-    }
-    save_tool_configs(tool_configs)
-
-    print(
-        f"  Successfully installed {tool_name} {actual_version} at {expected_executable_path}",
-        file=sys.stderr,
-    )
-    return expected_executable_path
+        if os.path.exists(tool_dir) and not os.listdir(tool_dir):
+            shutil.rmtree(tool_dir)
+        return None
 
 
 def find_tool_executable(tool_configs, tool_query):
     """
-    Finds the executable path for a tool based on the query.
-    Query can be 'tool_name' or 'repo_full_name' or 'repo_full_name:vX.Y.Z'.
+    Finds the executable path for a tool based on the query. Returns the tool_info dict on success.
     """
-    tool_name_part = tool_query.split("/")[
-        0
-    ].lower()  # e.g., 'nektos' or 'act' if just 'act'
+    target_key = None
+    repo_full_name_from_query = tool_query
+
     if ":" in tool_query:
-        repo_full_name, version = tool_query.split(":", 1)
-        # Standardize 'v' prefix
-        if not version.startswith("v") and version != "latest":
-            version = f"v{version}"
-        target_key = f"{repo_full_name}:{version}"
-    else:
-        repo_full_name = tool_query  # Assume query is repo_full_name
-        target_key = None  # Will find the latest pinned for this repo
+        parts = tool_query.split(":", 1)
+        repo_full_name_from_query = parts[0]
+        version_req = parts[1]
+        if not version_req.startswith("v") and version_req.lower() != "latest":
+            version_req = f"v{version_req}"
+        target_key = f"{repo_full_name_from_query}:{version_req}"
 
     found_tool = None
-    if target_key:  # Specific version requested
-        if target_key in tool_configs["tools"]:
-            found_tool = tool_configs["tools"][target_key]
-        else:
-            # If not found directly, assume it's for 'latest' and try to find the last-run 'latest' for this repo
-            # No, if specific version is requested, we need to try and get that specific version (or fail)
-            pass
+    actual_tool_key_found = None
 
-    if not found_tool:  # If no specific version requested, or specific version not found, find the latest-accessed for the repo
-        # Look for the last-accessed version for this repo
+    if target_key and target_key in tool_configs["tools"]:
+        found_tool = tool_configs["tools"][target_key]
+        actual_tool_key_found = target_key
+        logger.debug(f"Direct match found for key: {target_key}")
+    elif ":" not in tool_query:  # Bare repo name passed, find last used
         latest_accessed = None
         for key, tool_info in tool_configs["tools"].items():
-            if tool_info["repo"].lower() == repo_full_name.lower():
+            if tool_info["repo"].lower() == repo_full_name_from_query.lower():
+                current_accessed_dt = datetime.fromisoformat(
+                    tool_info.get("last_accessed", "1970-01-01T00:00:00")
+                )
                 if (
                     latest_accessed is None
-                    or tool_info["last_accessed"] > latest_accessed["last_accessed"]
+                    or current_accessed_dt
+                    > datetime.fromisoformat(
+                        latest_accessed.get("last_accessed", "1970-01-01T00:00:00")
+                    )
                 ):
                     latest_accessed = tool_info
+                    actual_tool_key_found = key
         if latest_accessed:
             found_tool = latest_accessed
-            print(
-                f"  Using pinned version {found_tool['version']} for {tool_query} (last accessed).",
-                file=sys.stderr,
+            logger.info(
+                f"No specific version requested. Using pinned version {found_tool['version']} for {tool_query} (last accessed)."
             )
 
     if found_tool:
-        # Check if the executable still exists
-        if os.path.exists(found_tool["executable_path"]):
+        if os.path.exists(found_tool["executable_path"]) and system_is_executable(
+            found_tool["executable_path"], platform.system()
+        ):
+            if actual_tool_key_found:
+                tool_configs["tools"][actual_tool_key_found]["last_accessed"] = (
+                    datetime.now().isoformat()
+                )
+                save_tool_configs(tool_configs)
             return found_tool
         else:
-            print(
-                f"  Warning: Pinned executable for {found_tool['repo']}@{found_tool['version']} is missing from {found_tool['executable_path']}. Will attempt to re-install.",
-                file=sys.stderr,
+            logger.warning(
+                f"Pinned executable for {found_tool['repo']}@{found_tool['version']} is missing or not executable at {found_tool['executable_path']}. Will attempt to re-install."
             )
-            # Remove this broken entry
-            del tool_configs["tools"][f"{found_tool['repo']}:v{found_tool['version']}"]
-            save_tool_configs(tool_configs)
-            return None  # Indicate need for fresh install
+            if actual_tool_key_found and actual_tool_key_found in tool_configs["tools"]:
+                del tool_configs["tools"][actual_tool_key_found]
+                save_tool_configs(tool_configs)
+            return None
 
     return None
 
 
 def check_for_updates(tool_configs):
     """Checks for updates for previously installed tools that haven't been updated recently."""
-    update_check_days = tool_configs["settings"]["update_check_days"]
+    update_check_days = tool_configs["settings"].get(
+        "update_check_days", DEFAULT_UPDATE_CHECK_DAYS
+    )
     if update_check_days <= 0:
-        print("  Update checks are disabled.", file=sys.stderr)
+        logger.info("Update checks are disabled via configuration.")
         return
 
-    print(
-        f"  Checking for updates for installed tools (last checked > {update_check_days} days ago)...",
-        file=sys.stderr,
+    logger.info(
+        f"Checking for updates for installed tools (last checked > {update_check_days} days ago)..."
     )
 
     now = datetime.now()
     needs_update_info = []
 
-    for key, tool_info in list(
-        tool_configs["tools"].items()
-    ):  # Iterate over a copy to allow modification
+    for key, tool_info in list(tool_configs["tools"].items()):
+        is_fixed_version = (
+            tool_info["version"].lower() != "latest"
+            and tool_info["version"].lower() != "unknown"
+        )
+
+        if is_fixed_version:
+            logger.debug(f"Skipping update check for fixed version: {key}")
+            continue
+
         last_accessed_dt = datetime.fromisoformat(
             tool_info.get("last_accessed")
             or tool_info.get("installed_at", now.isoformat())
         )
 
-        # Only check tools that are not specifically version-pinned (e.g., nektos/act:v0.2.79)
         if last_accessed_dt + timedelta(days=update_check_days) < now:
-            if (
-                ":" not in key
-            ):  # Not a specific version like tool:v1.2.3, implies it's the "latest" for that repo
-                repo_full_name = tool_info["repo"]
-                print(
-                    f"  Checking latest version for {repo_full_name}...",
-                    file=sys.stderr,
-                )
-                latest_release_info = get_gh_release_info(repo_full_name, "latest")
-                if latest_release_info:
-                    latest_tag = latest_release_info.get("tag_name")
-                    if latest_tag and latest_tag != tool_info["version"]:
-                        needs_update_info.append(
-                            f"  Tool {tool_info['tool_name']} ({repo_full_name}) has an update: {tool_info['version']} -> {latest_tag}"
-                        )
-                        # Optionally: auto-update here if configured globally
-                        # For now, just notify. Auto-update should be a conscious choice.
-                # Update last accessed to prevent re-checking too soon, even if no update found
-                tool_configs["tools"][key]["last_accessed"] = now.isoformat()
-                save_tool_configs(
-                    tool_configs
-                )  # Save after each check to persist 'last_accessed'
+            repo_full_name = tool_info["repo"]
+            logger.debug(
+                f"Fetching latest release info for {repo_full_name} for update check..."
+            )
+            latest_release_info = get_gh_release_info(repo_full_name, "latest")
+            if latest_release_info:
+                latest_tag = latest_release_info.get("tag_name")
+                if latest_tag and latest_tag != tool_info["version"]:
+                    needs_update_info.append(
+                        f"Tool {tool_info['tool_name']} ({repo_full_name}) has an update: {tool_info['version']} -> {latest_tag}"
+                    )
+            tool_configs["tools"][key]["last_accessed"] = now.isoformat()
+            save_tool_configs(tool_configs)
 
     if needs_update_info:
         print("\n--- Tool Updates Available ---", file=sys.stderr)
@@ -802,113 +942,111 @@ def check_for_updates(tool_configs):
         )
         print("----------------------------\n", file=sys.stderr)
     else:
-        print("  No updates found or check not due.", file=sys.stderr)
+        logger.info(
+            "No updates found or all checks are still pending for their next cycle."
+        )
 
 
 def list_installed_tools(tool_configs):
     """Lists all installed tools."""
-    print("--- Installed Tooler Tools ---", file=sys.stderr)
+    print("--- Installed Tooler Tools ---")
     if not tool_configs["tools"]:
-        print("  No tools installed yet.", file=sys.stderr)
+        print("  No tools installed yet.")
         return
 
-    for key, tool_info in tool_configs["tools"].items():
-        print(f"  - {tool_info['repo']}", file=sys.stderr)
-        print(f"    Version: {tool_info['version']}", file=sys.stderr)
-        print(f"    Path:    {tool_info['executable_path']}", file=sys.stderr)
-        print(f"    Installed: {tool_info.get('installed_at', 'N/A')}", file=sys.stderr)
-        print(
-            f"    Last Run:  {tool_info.get('last_accessed', 'N/A')}", file=sys.stderr
+    sorted_tools = sorted(
+        tool_configs["tools"].items(), key=lambda item: item[1]["repo"].lower()
+    )
+
+    for key, tool_info in sorted_tools:
+        install_type_display = (
+            f" ({tool_info.get('install_type', 'binary')})"
+            if tool_info.get("install_type")
+            else ""
         )
-        print("", file=sys.stderr)
-    print("------------------------------", file=sys.stderr)
+        print(f"  - {tool_info['repo']}{install_type_display}")
+        print(f"    Version: {tool_info['version']}")
+        print(f"    Path:    {tool_info['executable_path']}")
+        print(f"    Installed: {tool_info.get('installed_at', 'N/A')}")
+        print(f"    Last Run:  {tool_info.get('last_accessed', 'N/A')}")
+        print("")
+    print("------------------------------")
 
 
 def remove_tool(tool_configs, tool_query):
     """Removes an installed tool."""
 
-    tool_key_to_remove = None
-    removal_paths = []
+    tools_to_remove_keys = []
+    removal_dirs = set()
 
-    # Try to find an exact match first based on the query (repo or repo:v)
+    found_any = False
     for key, info in tool_configs["tools"].items():
         if key.lower() == tool_query.lower():
-            tool_key_to_remove = key
-            removal_paths.append(
-                os.path.dirname(os.path.dirname(info["executable_path"]))
-            )  # Root tool directory for this version
+            tools_to_remove_keys.append(key)
+            if info.get("install_type") == "python-venv":
+                removal_dirs.add(os.path.dirname(info["executable_path"]))
+            else:
+                removal_dirs.add(
+                    os.path.dirname(os.path.dirname(info["executable_path"]))
+                )
+            found_any = True
             break
         elif (
-            info["repo"].lower() == tool_query.lower() and ":" not in tool_query
-        ):  # User gave only repo name, remove ALL versions
-            print(f"  Warning: Removing all versions of {tool_query}", file=sys.stderr)
-            tool_key_to_remove = key  # Mark for deletion
-            removal_paths.append(
-                os.path.dirname(os.path.dirname(info["executable_path"]))
-            )  # Root tool directory for this version
-
-    if not tool_key_to_remove:
-        # If no exact match and it's a simple name, try matching tool_name field
-        for key, info in tool_configs["tools"].items():
-            if info["tool_name"].lower() == tool_query.lower():
-                print(
-                    f"  Info: Matched Tool name '{tool_query}' to '{info['repo']}'. Removing all versions.",
-                    file=sys.stderr,
-                )
-                tool_key_to_remove = key
-                removal_paths.append(
+            info["repo"].lower() == tool_query.split(":")[0].lower()
+            and ":" not in tool_query
+        ):
+            tools_to_remove_keys.append(key)
+            if info.get("install_type") == "python-venv":
+                removal_dirs.add(os.path.dirname(info["executable_path"]))
+            else:
+                removal_dirs.add(
                     os.path.dirname(os.path.dirname(info["executable_path"]))
                 )
+            found_any = True
+        elif (
+            info["tool_name"].lower() == tool_query.lower()
+            and ":" not in tool_query
+            and "/" not in tool_query
+        ):
+            tools_to_remove_keys.append(key)
+            if info.get("install_type") == "python-venv":
+                removal_dirs.add(os.path.dirname(info["executable_path"]))
+            else:
+                removal_dirs.add(
+                    os.path.dirname(os.path.dirname(info["executable_path"]))
+                )
+            found_any = True
 
-    if not tool_key_to_remove:
-        print(
-            f"  Error: Tool '{tool_query}' not found in installed list.",
-            file=sys.stderr,
-        )
+    if not found_any:
+        logger.error(f"Tool '{tool_query}' not found in installed list.")
         return False
 
-    temp_keys_to_remove = []
-    if (
-        ":" not in tool_query and tool_key_to_remove
-    ):  # If user provided repo name only, remove all related versions
-        for key, info in tool_configs["tools"].items():
-            if (
-                info["repo"].lower() == tool_query.lower()
-                or info["tool_name"].lower() == tool_query.lower()
-            ):
-                temp_keys_to_remove.append(key)
-                removal_paths.append(
-                    os.path.dirname(os.path.dirname(info["executable_path"]))
-                )
-    else:  # Specific version or exact match
-        temp_keys_to_remove.append(tool_key_to_remove)
-
-    unique_removal_paths = list(set(removal_paths))
+    if ":" not in tool_query and len(tools_to_remove_keys) > 1:
+        logger.info(
+            f"Removing {len(tools_to_remove_keys)} installations for '{tool_query}' across different versions/repos."
+        )
 
     success = True
-    for path in unique_removal_paths:
+    for path in removal_dirs:
         if os.path.exists(path):
-            print(f"  Removing directory: {path}", file=sys.stderr)
+            logger.info(f"Removing directory: {path}")
             try:
                 shutil.rmtree(path)
             except OSError as e:
-                print(f"  Error removing directory {path}: {e}", file=sys.stderr)
+                logger.error(f"Error removing directory {path}: {e}")
                 success = False
         else:
-            print(
-                f"  Info: Directory not found, already removed?: {path}",
-                file=sys.stderr,
-            )
+            logger.info(f"Directory not found, already removed?: {path}")
 
     if success:
-        for key_to_del in temp_keys_to_remove:
+        for key_to_del in tools_to_remove_keys:
             if key_to_del in tool_configs["tools"]:
                 del tool_configs["tools"][key_to_del]
         save_tool_configs(tool_configs)
-        print(f"  Tool(s) for '{tool_query}' removed successfully.", file=sys.stderr)
+        logger.info(f"Tool(s) for '{tool_query}' removed successfully.")
         return True
     else:
-        print(f"  Failed to fully remove tool(s) for '{tool_query}'.", file=sys.stderr)
+        logger.error(f"Failed to fully remove tool(s) for '{tool_query}'.")
         return False
 
 
@@ -916,13 +1054,16 @@ def remove_tool(tool_configs, tool_query):
 def main():
     parser = argparse.ArgumentParser(
         description="Tooler: Download and manage CLI tools from GitHub releases.",
-        formatter_class=argparse.RawTextHelpFormatter,  # Preserve newlines in help
+        formatter_class=argparse.RawTextHelpFormatter,
         epilog="""
 Examples:
   Run a tool:
-    tooler nektos/act                       # Runs the latest pinned 'act' tool
-    tooler nektos/act:v0.2.79               # Runs specific 'act' version v0.2.79
-    tooler nektos/act -- install            # Explicitly installs/updates nektos/act (useful with arguments)
+    tooler run nektos/act                   # Runs the latest pinned 'act' tool
+    tooler run nektos/act:v0.2.79           # Runs specific 'act' version v0.2.79
+    tooler run nektos/act -- install        # Pass arguments to the tool
+
+  Python Example:
+    tooler run adrienverge/yamllint         # Installs yamllint in a managed Python env
 
   Manage tools:
     tooler list                             # List all installed tools
@@ -933,30 +1074,47 @@ Examples:
 
   Configuration:
     tooler config set update_check_days=30  # Set update check interval to 30 days
+    tooler config get                       # Show all settings
+
+Verbosity levels (default: WARNING):
+    Less verbose: `tooler -q ...` (ERROR only)
+    More verbose: `tooler -v ...` (INFO and above)
+    Debug:        `tooler -vv ...` (DEBUG and above)
 """,
     )
 
-    # Subparsers for commands
-    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="Increase verbosity (can be used multiple times, e.g., -vv for debug)",
+    )
+    parser.add_argument(
+        "-q",
+        "--quiet",
+        action="store_true",
+        help="Suppress output, show only errors.",
+    )
 
-    # Command: run (default)
+    subparsers = parser.add_subparsers(
+        dest="command", help="Available commands", required=True
+    )
+
     run_parser = subparsers.add_parser(
         "run",
-        help="Run a GitHub CLI tool. This is the default command if a tool_id is provided.",
+        help="Run a GitHub CLI tool.",
     )
     run_parser.add_argument(
         "tool_id",
-        nargs="?",  # Makes it optional
         help="GitHub repository (e.g., 'nektos/act') or full ID (e.g., 'nektos/act:v0.2.79').",
     )
     run_parser.add_argument(
         "tool_args", nargs=argparse.REMAINDER, help="Arguments to pass to the tool."
     )
 
-    # Command: list
     list_parser = subparsers.add_parser("list", help="List all installed tools.")
 
-    # Command: update
     update_parser = subparsers.add_parser(
         "update", help="Update one or all installed tools to their latest version."
     )
@@ -969,10 +1127,9 @@ Examples:
     update_group.add_argument(
         "--all",
         action="store_true",
-        help="Update all non-pinned tools to their latest versions.",
+        help="Update all applicable tools to their latest versions.",
     )
 
-    # Command: remove
     remove_parser = subparsers.add_parser(
         "remove", help="Remove an installed tool and its data."
     )
@@ -980,12 +1137,11 @@ Examples:
         "tool_id", help="Tool to remove (e.g., 'nektos/act' or 'nektos/act:v0.2.79')."
     )
 
-    # Command: config
     config_parser = subparsers.add_parser(
         "config", help="Manage tooler's configuration settings."
     )
     config_subparsers = config_parser.add_subparsers(
-        dest="config_command", help="Config commands"
+        dest="config_command", help="Config commands", required=True
     )
 
     config_get_parser = config_subparsers.add_parser(
@@ -1004,22 +1160,27 @@ Examples:
         "key_value", help="Key=Value pair (e.g., 'update_check_days=30')."
     )
 
-    # Parse initial arguments
-    # If no command is given but has a positional argument that looks like a tool ID, default to 'run'
-    if (
-        len(sys.argv) > 1
-        and sys.argv[1] not in subparsers.choices
-        and not sys.argv[1].startswith("-")
-    ):
-        # Insert 'run' command at the second position (index 1)
-        sys.argv.insert(1, "run")
-
     args = parser.parse_args()
+
+    ch = logging.StreamHandler(sys.stderr)
+    ch.setFormatter(ToolerFormatter())
+
+    if args.quiet:
+        ch.setLevel(logging.ERROR)
+    elif args.verbose == 0:
+        ch.setLevel(logging.WARNING)
+    elif args.verbose == 1:
+        ch.setLevel(logging.INFO)
+    else:
+        ch.setLevel(logging.DEBUG)
+
+    for handler in logger.handlers[:]:
+        logger.removeHandler(handler)
+    logger.addHandler(ch)
 
     tool_configs = load_tool_configs()
 
-    # Automatic update check notification
-    if args.command in ["run", None]:  # Only check on 'run' command
+    if args.command in ["run", "update"]:
         check_for_updates(tool_configs)
 
     if args.command == "list":
@@ -1030,38 +1191,37 @@ Examples:
         sys.exit(0)
     elif args.command == "update":
         if args.all:
-            print("  Updating all applicable tools...", file=sys.stderr)
+            logger.info("Updating all applicable tools...")
             updated_count = 0
             for key, tool_info in list(tool_configs["tools"].items()):
-                # Only update tools not explicitly pinned and recently checked
-                if ":" not in key:  # Not a specific version like tool:v1.2.3
-                    print(
-                        f"\n  Attempting to update {tool_info['repo']}...",
-                        file=sys.stderr,
+                is_fixed_version = (
+                    tool_info["version"].lower() != "latest"
+                    and tool_info["version"].lower() != "unknown"
+                )
+
+                if is_fixed_version:
+                    logger.info(
+                        f"Tool {tool_info['repo']} ({tool_info['version']}) is a fixed version, skipping update."
                     )
-                    executable_path = install_or_update_tool(
-                        tool_configs,
-                        tool_info["tool_name"],
-                        tool_info["repo"],
-                        version="latest",
-                        force_update=True,
-                    )
-                    if executable_path:
-                        updated_count += 1
-                else:
-                    print(
-                        f"\n  Tool {tool_info['repo']} is version pinned, skipping updating.",
-                        file=sys.stderr,
-                    )
-            print(
-                f"\n  Update process finished. {updated_count} tool(s) updated.",
-                file=sys.stderr,
+                    continue
+
+                logger.info(f"Attempting to update {tool_info['repo']}...")
+                install_or_update_tool(
+                    tool_configs,
+                    tool_info["tool_name"],
+                    tool_info["repo"],
+                    version="latest",
+                    force_update=True,
+                )
+                updated_count += 1
+            logger.info(
+                f"Update process finished. {updated_count} tool(s) were checked/updated."
             )
             sys.exit(0)
         elif args.tool_id:
             repo_full_name = args.tool_id.split(":")[0]
             tool_name = repo_full_name.split("/")[-1]
-            print(f"  Attempting to update {args.tool_id}...", file=sys.stderr)
+            logger.info(f"Attempting to update {args.tool_id}...")
             executable_path = install_or_update_tool(
                 tool_configs,
                 tool_name,
@@ -1070,139 +1230,96 @@ Examples:
                 force_update=True,
             )
             if executable_path:
-                print(f"  {args.tool_id} updated successfully.", file=sys.stderr)
+                logger.info(f"{args.tool_id} updated successfully.")
                 sys.exit(0)
             else:
-                print(f"  Failed to update {args.tool_id}.", file=sys.stderr)
+                logger.error(f"Failed to update {args.tool_id}.")
                 sys.exit(1)
     elif args.command == "config":
         if args.config_command == "get":
             if args.key:
                 val = tool_configs["settings"].get(args.key)
                 if val is not None:
-                    print(f"{args.key}={val}", file=sys.stderr)
+                    print(val)
                 else:
-                    print(f"Setting '{args.key}' not found.", file=sys.stderr)
+                    logger.error(f"Setting '{args.key}' not found.")
                     sys.exit(1)
-            else:  # List all settings
-                print("--- Tooler Settings ---", file=sys.stderr)
+            else:
+                print("--- Tooler Settings ---")
                 for key, value in tool_configs["settings"].items():
-                    print(f"  {key}: {value}", file=sys.stderr)
-                print("-----------------------", file=sys.stderr)
+                    print(f"  {key}: {value}")
+                print("-----------------------")
             sys.exit(0)
         elif args.config_command == "set":
             if "=" in args.key_value:
                 key, value_str = args.key_value.split("=", 1)
                 try:
-                    # Attempt to convert to appropriate type
                     if value_str.isdigit():
                         value = int(value_str)
                     elif value_str.lower() in ("true", "false"):
                         value = value_str.lower() == "true"
                     else:
-                        value = value_str  # Keep as string
+                        value = value_str
 
                     tool_configs["settings"][key] = value
                     save_tool_configs(tool_configs)
-                    print(f"Setting '{key}' updated to '{value}'.", file=sys.stderr)
+                    logger.info(f"Setting '{key}' updated to '{value}'.")
                     sys.exit(0)
                 except ValueError:
-                    print(
-                        f"Could not parse value for '{key}'. Please provide integer, boolean, or string.",
-                        file=sys.stderr,
+                    logger.error(
+                        f"Could not parse value for '{key}'. Please provide integer, boolean, or string."
                     )
                     sys.exit(1)
             else:
-                print("Invalid format. Use 'key=value'.", file=sys.stderr)
+                logger.error("Invalid format. Use 'key=value'.")
                 sys.exit(1)
-        else:
-            print(
-                "Dumping entire config",
-                file=sys.stderr,
-            )
-            print(json.dumps(tool_configs, indent=2), file=sys.stderr)
-    elif args.command == "run" and args.tool_id:  # Main execution path
+    elif args.command == "run":
         repo_full_name = args.tool_id.split(":")[0]
         tool_version_req = (
             args.tool_id.split(":", 1)[1] if ":" in args.tool_id else "latest"
         )
         tool_name = repo_full_name.split("/")[-1]
 
-        executable_path = None
-
-        # 1. Try to find an existing, valid installation
         tool_info_found = find_tool_executable(tool_configs, args.tool_id)
-        if tool_info_found:
-            executable_path = tool_info_found["executable_path"]
-            # Update last_accessed for the specific key that was resolved
-            if (
-                tool_version_req == "latest"
-            ):  # If "latest" was requested, update specific version key
-                resolved_key = (
-                    f"{tool_info_found['repo']}:v{tool_info_found['version']}"
-                )
-            else:
-                resolved_key = args.tool_id
 
-            # Ensure the specific version key exists. Could happen if tool_id was "repo" then it picked one.
-            if resolved_key not in tool_configs["tools"]:
-                tool_configs["tools"][resolved_key] = (
-                    tool_info_found  # Add the resolved one if it was just "repo"
-                )
-            tool_configs["tools"][resolved_key]["last_accessed"] = (
-                datetime.now().isoformat()
+        if not tool_info_found:
+            logger.info(
+                f"Tool {args.tool_id} not found locally or is corrupted. Attempting to install/update..."
             )
-            save_tool_configs(tool_configs)
-
-        # 2. If not found or broken, install/update
-        if not executable_path:
-            print(
-                f"  Tool {args.tool_id} not found or corrupted. Attempting to install/update...",
-                file=sys.stderr,
-            )
-            executable_path = install_or_update_tool(
+            install_or_update_tool(
                 tool_configs, tool_name, repo_full_name, version=tool_version_req
             )
+            # Re-fetch the info AFTER installation to get the correct path and type.
+            tool_info_found = find_tool_executable(load_tool_configs(), args.tool_id)
 
-        if executable_path:
-            # Prepare arguments for execution
-            # In Windows, if a path has spaces, it needs to be quoted for subprocess correctly.
-            # However, subprocess.Popen handles this when the command is a list.
+        if tool_info_found:
+            executable_path = tool_info_found["executable_path"]
             cmd = [executable_path] + args.tool_args
 
-            print(f"  Running: {' '.join(cmd)}", file=sys.stderr)
+            logger.debug(f"Executing: {cmd}")
             try:
-                # Execute the tool
-                # Use sys.executable and -c if the executable_path implies a Python script runner,
-                # though for GitHub releases it's usually a compiled binary.
-                os.execv(cmd[0], cmd)
-                # os.execv replaces the current process, so code after this is only reached if it fails
-            except FileNotFoundError:
-                print(
-                    f"  Error: Executable not found at {executable_path}. It might have been moved or deleted.",
-                    file=sys.stderr,
-                )
-                sys.exit(127)  # Command not found exit code
-            except OSError as e:
-                print(f"  Error directly executing tool: {e}", file=sys.stderr)
-                # Fallback to subprocess.run if os.execv fails (e.g., permissions, shell issues)
-                try:
-                    import subprocess
-
+                # Use subprocess.run for shims/batch files for portability
+                if (
+                    tool_info_found.get("install_type") == "python-venv"
+                    or platform.system() == "Windows"
+                ):
                     result = subprocess.run(cmd, check=False)
                     sys.exit(result.returncode)
-                except Exception as sub_e:
-                    print(f"  Error running via subprocess: {sub_e}", file=sys.stderr)
-                    sys.exit(1)
+                else:  # Use os.execv for direct native binaries on Unix-like systems for efficiency
+                    os.execv(cmd[0], cmd)
+            except FileNotFoundError:
+                logger.error(
+                    f"Executable not found at {executable_path}. It might have been moved or deleted."
+                )
+                sys.exit(127)
+            except OSError as e:
+                logger.error(f"Error executing tool: {e}")
+                sys.exit(1)
         else:
-            print(
-                f"  Failed to get executable for {args.tool_id}. See errors above.",
-                file=sys.stderr,
+            logger.error(
+                f"Failed to get executable for {args.tool_id}. See errors above."
             )
             sys.exit(1)
-    else:
-        parser.print_help()
-        sys.exit(1)
 
 
 if __name__ == "__main__":
