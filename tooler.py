@@ -12,7 +12,7 @@ import tarfile
 import tempfile
 import zipfile
 from datetime import datetime
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 from tqdm import tqdm
@@ -175,92 +175,199 @@ def get_system_arch() -> str:
     """Determines the standard system architecture string."""
     machine = platform.machine().lower()
     system = platform.system().lower()
-    arch_map = {
+
+    # Standardize to "amd64", "arm64", or "arm" for internal use
+    if (
+        "aarch64" in machine
+        or "arm64" in machine
+        or (system == "darwin" and "arm" in machine)
+    ):
+        return "arm64"
+    if "x86_64" in machine or "amd64" in machine:
+        return "amd64"
+    if "armv7" in machine or "arm" in machine:  # Fallback for 32-bit ARM on Linux
+        return "arm"
+
+    return machine  # Return raw machine if not specifically mapped
+
+
+# --- Centralized Alias and Configuration ---
+PLATFORM_ALIASES = {
+    "os": {
         "linux": {
-            "aarch64": "arm64",
-            "arm": "arm",
-            "x86_64": "amd64",
-            "amd64": "amd64",
+            "aliases": ["linux", "unknown-linux", "pc-linux"],
+            "distros": ["gnu", "musl"],
         },
-        "darwin": {"aarch64": "arm64", "arm": "arm64", "x86_64": "amd64"},
-        "windows": {"amd64": "amd64", "x86_64": "amd64"},
-    }
-    if system in arch_map:
-        for keyword, arch in arch_map[system].items():
-            if keyword in machine:
-                return arch
-    return machine
+        "darwin": {"aliases": ["macos", "darwin", "apple-darwin"]},
+        "windows": {
+            "aliases": ["windows", "win", "pc-windows"],
+            "distros": ["msvc", "gnu"],
+        },
+    },
+    "arch": {
+        "amd64": {"aliases": ["amd64", "x86_64", "x64"]},
+        "arm64": {"aliases": ["arm64", "aarch64"]},
+        "arm": {"aliases": ["arm", "armv7", "armv7l"]},
+    },
+}
+
+# The new scoring system replaces the rigid, verbose tier list.
+# Adjust weights to change matching priorities.
+SCORING_WEIGHTS = {
+    "os": 10,
+    "arch": 10,
+    "distro": 5,
+    "tool_name": 3,
+    "version": 2,
+}
+
+# Extensions that disqualify an asset from being a primary executable/archive.
+# .whl is handled separately as a fallback.
+INVALID_EXTENSIONS = (
+    ".sha256",
+    ".asc",
+    ".sig",
+    ".pem",
+    ".pub",
+    ".md",
+    ".txt",
+    ".pom",
+    ".xml",
+    ".json",
+    ".whl",
+)
 
 
-def map_arch_to_github_release(
-    arch: str, system: str
-) -> Optional[Union[str, Tuple[str, ...]]]:
-    """Maps internal arch/system to common GitHub release file naming conventions."""
-    system = system.lower()
-    if system == "linux":
-        if arch == "amd64":
-            return "linux_amd64"
-        if arch == "arm64":
-            return "linux_arm64"
-    elif system == "darwin":
-        if arch == "amd64":
-            return "darwin_amd64"
-        if arch == "arm64":
-            return "darwin_arm64"
-    elif system == "windows" and arch == "amd64":
-        return "windows_amd64"
-    if arch == "amd64":
-        return (f"{system}_x86_64", f"{system}-x86_64", f"{system}-amd64")
-    if arch == "arm64":
-        return (f"{system}_aarch64", f"{system}-aarch64", f"{system}-arm64")
-    return None
+def get_system_info() -> Tuple[str, str]:
+    """Determines the standardized OS and architecture."""
+    system = platform.system().lower()
+    machine = platform.machine().lower()
+
+    if "aarch64" in machine or "arm64" in machine:
+        arch = "arm64"
+    elif "x86_64" in machine or "amd64" in machine:
+        arch = "amd64"
+    elif "arm" in machine:  # Broad catch for armv7l etc.
+        arch = "arm"
+    else:
+        arch = machine
+
+    return system, arch
+
+
+def _get_platform_keywords(
+    platform_type: str, platform_name: str
+) -> Tuple[Set[str], Set[str]]:
+    """Helper to get aliases and distros for a given platform."""
+    config = PLATFORM_ALIASES.get(platform_type, {}).get(platform_name.lower(), {})
+    aliases = set(config.get("aliases", [platform_name.lower()]))
+    distros = set(config.get("distros", []))
+    return aliases, distros
 
 
 def find_asset_for_platform(
-    assets: List[Dict[str, Any]], repo_full_name: str, system_arch: str, system_os: str
+    assets: List[Dict[str, Any]],
+    repo_full_name: str,
+    system_os: str,
+    system_arch: str,
 ) -> Tuple[Optional[str], Optional[str]]:
-    """Finds a suitable binary asset from GitHub releases."""
-    system_os_lower, _tool_name = system_os.lower(), repo_full_name.split("/")[1]
-    possible_patterns: List[str] = [
-        f"{system_os_lower}_{system_arch}",
-        f"{system_os_lower}-{system_arch}",
-    ]
-    if mapped := map_arch_to_github_release(system_arch, system_os):
-        if isinstance(mapped, str):
-            possible_patterns.append(mapped)
-        else:
-            possible_patterns.extend(mapped)
-    if system_os_lower == "windows":
-        possible_patterns.append("windows")
-    elif system_os_lower == "darwin":
-        possible_patterns.append("macos")
-    possible_patterns = sorted(list(set(possible_patterns)), key=len, reverse=True)
-    logger.debug(f"Searching for assets with patterns: {possible_patterns}")
+    """
+    Finds the best binary asset by prioritizing archives over packages.
 
-    for pattern in possible_patterns:
-        for asset in assets:
-            if pattern in asset["name"].lower() and (
-                asset["name"].endswith((".tar.gz", ".zip"))
-            ):
-                logger.debug(f"Found archive asset: {asset['name']}")
-                return asset["browser_download_url"], asset["name"]
-    for pattern in possible_patterns:
-        for asset in assets:
-            if pattern in asset["name"].lower() and not any(
-                ext in asset["name"].lower() for ext in [".tar.", ".zip", ".whl"]
-            ):
-                if (
-                    system_os_lower == "windows" and asset["name"].endswith(".exe")
-                ) or (system_os_lower != "windows" and "." not in asset["name"]):
-                    logger.debug(f"Found executable asset: {asset['name']}")
-                    return asset["browser_download_url"], asset["name"]
+    Matching Priority:
+    1. Archive (OS + Arch)
+    2. Package (OS + Arch)
+    3. Archive (OS only)
+    4. Package (OS only)
+    5. And so on for Arch only, then .whl fallback.
+
+    Returns:
+        A tuple containing the asset's download URL and name, or (None, None).
+    """
+    system_os, system_arch = system_os.lower(), system_arch.lower()
+
+    asset_names = [a.get("name", "unnamed-asset") for a in assets]
+    logger.debug(f"Available assets for '{repo_full_name}': {asset_names}")
+
+    os_aliases, _ = _get_platform_keywords("os", system_os)
+    arch_aliases, _ = _get_platform_keywords("arch", system_arch)
+
+    # Define preferred asset types
+    ARCHIVE_EXTS = (".tar.gz", ".zip", ".tar.xz", ".tgz")
+    PACKAGE_EXTS = (".apk", ".deb", ".rpm")
+
+    # --- 1. Categorize all assets in a single pass ---
+    candidates = {
+        "os_arch_archive": [],
+        "os_arch_package": [],
+        "os_only_archive": [],
+        "os_only_package": [],
+        "arch_only_archive": [],
+        "arch_only_package": [],
+    }
+
     for asset in assets:
-        if asset["name"].endswith(".whl"):
-            logger.info(f"Native binary not found. Using Python wheel: {asset['name']}")
-            return asset["browser_download_url"], asset["name"]
+        name_lower = asset.get("name", "").lower()
+        if name_lower.endswith(INVALID_EXTENSIONS):
+            continue
 
-    logger.error("No suitable binary asset (archive, executable, or .whl) found.")
-    logger.error(f"Available assets on release: {[a['name'] for a in assets]}")
+        has_os = any(alias in name_lower for alias in os_aliases)
+        has_arch = any(alias in name_lower for alias in arch_aliases)
+
+        is_archive = name_lower.endswith(ARCHIVE_EXTS)
+        is_package = name_lower.endswith(PACKAGE_EXTS)
+
+        # Assign asset to the correct category
+        if has_os and has_arch:
+            if is_archive:
+                candidates["os_arch_archive"].append(asset)
+            elif is_package:
+                candidates["os_arch_package"].append(asset)
+        elif has_os:
+            if is_archive:
+                candidates["os_only_archive"].append(asset)
+            elif is_package:
+                candidates["os_only_package"].append(asset)
+        elif has_arch:
+            if is_archive:
+                candidates["arch_only_archive"].append(asset)
+            elif is_package:
+                candidates["arch_only_package"].append(asset)
+
+    # --- 2. Select the first asset from the highest-priority list found ---
+    # The order of this list defines our preference
+    priority_order = [
+        "os_arch_archive",
+        "os_arch_package",
+        "os_only_archive",
+        "os_only_package",
+        "arch_only_archive",
+        "arch_only_package",
+    ]
+
+    best_candidates = []
+    for category in priority_order:
+        if candidates[category]:
+            logger.debug(
+                f"Found {len(candidates[category])} candidates in category '{category}'."
+            )
+            best_candidates = candidates[category]
+            break
+
+    if best_candidates:
+        # Simply pick the first asset from the highest-priority list
+        best_asset_dict = best_candidates[0]
+        logger.info(f"Found best match: '{best_asset_dict['name']}'")
+        return best_asset_dict.get("browser_download_url"), best_asset_dict.get("name")
+
+    # --- 3. Final fallback for cases where no other logic finds a match ---
+    logger.warning("No asset matched platform criteria. Checking for fallbacks.")
+    for asset in assets:
+        if asset.get("name", "").lower().endswith(".whl"):
+            logger.warning("Falling back to Python wheel.")
+            return asset.get("browser_download_url"), asset.get("name")
+
+    logger.error("No suitable asset found after all checks.")
     return None, None
 
 
@@ -292,34 +399,75 @@ def download_file(url: str, local_path: str) -> bool:
         return False
 
 
-def extract_archive(archive_path: str, extract_dir: str) -> bool:
-    """Extracts a tar.gz or zip archive with security checks."""
+def extract_archive(
+    archive_path: str, extract_dir: str, tool_name: str, os_system: str
+) -> Optional[str]:
+    """
+    Extracts a tar/zip archive and attempts to find the main executable within it.
+    Returns the path to the discovered executable or None if not found/error.
+    """
     logger.info(f"Extracting {os.path.basename(archive_path)}...")
     try:
-        if archive_path.endswith(".tar.gz"):
-            with tarfile.open(archive_path, "r:gz") as tar:
+        if archive_path.endswith((".tar.gz", ".tar.xz", ".tgz")):
+            with tarfile.open(
+                archive_path, "r:*"
+            ) as tar:  # r:* auto-detects compression
+                # Security check for path traversal
                 for member in tar.getmembers():
-                    if not os.path.realpath(
-                        os.path.join(extract_dir, member.name)
-                    ).startswith(os.path.realpath(extract_dir)):
+                    member_path = os.path.join(extract_dir, member.name)
+                    if not os.path.realpath(member_path).startswith(
+                        os.path.realpath(extract_dir)
+                    ):
                         logger.warning(f"Skipping malicious path in tar: {member.name}")
-                    else:
-                        tar.extract(member, path=extract_dir)
+                        continue
+                    tar.extract(member, path=extract_dir)
         elif archive_path.endswith(".zip"):
             with zipfile.ZipFile(archive_path, "r") as zip_ref:
+                # Security check for path traversal
                 for member in zip_ref.infolist():
-                    if not os.path.realpath(
-                        os.path.join(extract_dir, member.filename)
-                    ).startswith(os.path.realpath(extract_dir)):
+                    member_path = os.path.join(extract_dir, member.filename)
+                    if not os.path.realpath(member_path).startswith(
+                        os.path.realpath(extract_dir)
+                    ):
                         logger.warning(
                             f"Skipping malicious path in zip: {member.filename}"
                         )
-                    elif not member.is_dir():
+                        continue
+                    # Only extract files, not directories (they are created by extracting files)
+                    if not member.is_dir():
                         zip_ref.extract(member, path=extract_dir)
-        return True
+        else:
+            logger.error(f"Unsupported archive format: {archive_path}")
+            return None
+
+        # Find the executable in the extracted directory
+        executable_path = find_executable_in_extracted(
+            extract_dir, tool_name, os_system
+        )
+        if not executable_path:
+            logger.error(
+                f"Could not find executable for {tool_name} in extracted archive."
+            )
+            return None
+
+        # Make executable if on Unix-like system
+        if os_system != "Windows":
+            try:
+                os.chmod(executable_path, 0o755)  # rwxr-xr-x
+            except OSError as e:
+                logger.warning(
+                    f"Could not set execute permissions on {executable_path}: {e}"
+                )
+
+        logger.info(f"Successfully extracted and found executable: {executable_path}")
+        return executable_path
+
+    except (tarfile.ReadError, zipfile.BadZipFile) as e:
+        logger.error(f"Failed to extract archive {os.path.basename(archive_path)}: {e}")
+        return None
     except Exception as e:
-        logger.error(f"An unexpected error during extraction: {e}")
-        return False
+        logger.error(f"An unexpected error occurred during extraction: {e}")
+        return None
 
 
 def find_executable_in_extracted(
@@ -330,6 +478,8 @@ def find_executable_in_extracted(
     target_names = [required_tool_name.lower()]
     if os_system == "windows":
         target_names.append(f"{required_tool_name.lower()}.exe")
+
+    # Prioritize executables closer to the root, matching target names
     for root, _, files in os.walk(extract_dir):
         for file in files:
             full_path = os.path.join(root, file)
@@ -339,28 +489,44 @@ def find_executable_in_extracted(
                     file.lower(),
                     os.path.relpath(full_path, extract_dir),
                 )
+
+                # Higher score for direct name match (e.g., "logu" or "logu.exe")
                 if file_lower in target_names:
                     score += 100
+                # Next highest for name match without extension (e.g., "logu" for "logu.sh")
                 elif os.path.splitext(file_lower)[0] in target_names:
                     score += 90
+                # Decent score for tool name being a substring
                 elif required_tool_name.lower() in file_lower:
                     score += 50
+
+                # Penalize deeper paths
                 score -= rel_path.count(os.sep) * 10
                 candidates.append((score, full_path))
+
     if candidates:
         candidates.sort(key=lambda x: x[0], reverse=True)
-        logger.debug(f"Found executable candidate: {candidates[0][1]}")
+        logger.debug(
+            f"Selected executable candidate: {candidates[0][1]} (score: {candidates[0][0]})"
+        )
         return candidates[0][1]
     return None
 
 
 def system_is_executable(filepath: str, os_system: str) -> bool:
-    """Checks if a file is executable on the current system."""
-    if os_system == "windows":
+    """Checks if a file is executable on the current system, considering common executable extensions."""
+    if os_system == "Windows":
         return filepath.lower().endswith((".exe", ".bat", ".cmd")) and os.path.isfile(
             filepath
         )
-    return os.path.isfile(filepath) and os.access(filepath, os.X_OK)
+    # For Unix-like systems, check if it's a regular file and has execute permission
+    # Also, avoid common library extensions explicitly for robustness
+    if os.path.isfile(filepath) and os.access(filepath, os.X_OK):
+        # Exclude shared libraries unless explicitly looking for them (which we are not here)
+        if filepath.lower().endswith((".dll", ".so", ".dylib")):
+            return False
+        return True
+    return False
 
 
 # --- Python Tool Installation ---
@@ -395,12 +561,20 @@ def install_python_tool(
         logger.error(f"Failed to set up Python environment: {err_msg}")
         return None
 
+    # Create a shim script that activates the venv and runs the tool
+    # The tool's actual executable would be within .venv/bin/tool_name or .venv/Scripts/tool_name.exe
     shim_path_base = os.path.join(tool_dir, tool_name)
     if platform.system() == "Windows":
-        shim_content = f'@echo off\r\nset "PATH=%~dp0\\.venv\\Scripts;%PATH%"\r\n"%~dp0\\.venv\\Scripts\\{tool_name}.exe" %*\r\n'
-        shim_path = shim_path_base + ".bat"
+        # Point to the actual executable in the venv's Scripts folder
+        # For Python tools, the console entry point is usually tool_name.exe or tool_name.cmd/tool_name.py
+        # We assume tool_name.exe is what pip creates for console scripts on Windows
+        shim_content = f'@echo off\r\n"%~dp0\\.venv\\Scripts\\{tool_name}.exe" %*\r\n'
+        shim_path = (
+            shim_path_base + ".cmd"
+        )  # Using .cmd is more common for simple entry points
     else:
-        shim_content = f'#!/bin/sh\n. "$(dirname "$0")/.venv/bin/activate"\nexec "$(dirname "$0")/.venv/bin/{tool_name}" "$@"\n'
+        # For Unix-like, directly execute the script from the venv's bin folder
+        shim_content = f'#!/bin/sh\nexec "$(dirname "$0")/.venv/bin/{tool_name}" "$@"\n'
         shim_path = shim_path_base
     try:
         with open(shim_path, "w", newline="\n") as f:
@@ -462,16 +636,21 @@ def install_or_update_tool(
         return None
     actual_version = release_info.get("tag_name")
     if not actual_version:
-        return logger.error("Release has no tag_name, cannot proceed.")
+        logger.error("Release has no tag_name, cannot proceed.")
+        return None
 
     tool_key = (
         f"{repo_full_name}:v{actual_version}"
         if version == "latest"
         else f"{repo_full_name}:{version}"
     )
-    tool_dir = os.path.join(
-        get_tooler_tools_dir(), f"{repo_full_name.replace('/', '__')}", actual_version
+    # Install tools into a path like: ~/.local/share/tooler/tools/owner__repo/vX.Y.Z/
+    # This directory will contain extracted contents or the direct binary.
+    tool_install_base_dir = os.path.join(
+        get_tooler_tools_dir(), repo_full_name.replace("/", "__")
     )
+    tool_version_dir = os.path.join(tool_install_base_dir, actual_version)
+
     if not force_update and (current_info := tool_configs["tools"].get(tool_key)):
         if (
             "executable_path" in current_info
@@ -486,59 +665,71 @@ def install_or_update_tool(
             )
 
     logger.info(f"Installing/Updating {tool_name} {actual_version}...")
+
+    # Find the most suitable asset for the platform
     download_url, asset_name = find_asset_for_platform(
-        release_info.get("assets", []), repo_full_name, system_arch, system_os
+        release_info.get("assets", []),
+        repo_full_name,
+        system_arch,
+        system_os,
     )
     if not download_url or not asset_name:
+        logger.error(
+            f"No suitable asset found for {repo_full_name} {actual_version} for your platform."
+        )
         return None
 
-    if os.path.exists(tool_dir):
+    # Clean up any existing installation directory for this version
+    if os.path.exists(tool_version_dir):
         try:
-            shutil.rmtree(tool_dir)
+            shutil.rmtree(tool_version_dir)
         except OSError as e:
-            return logger.error(f"Error removing old directory {tool_dir}: {e}")
-    os.makedirs(tool_dir, exist_ok=True)
+            logger.error(f"Error removing old directory {tool_version_dir}: {e}")
+            return None
+    os.makedirs(
+        tool_version_dir, exist_ok=True
+    )  # Create the version-specific installation directory
 
     executable_path: Optional[str] = None
-    install_type = "binary"
+    install_type = "binary"  # Default install type
+
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_download_path = os.path.join(temp_dir, asset_name)
         if not download_file(download_url, temp_download_path):
             return None
 
-        if asset_name.endswith(".whl"):
+        if asset_name.lower().endswith(".whl"):
             install_type = "python-venv"
             executable_path = install_python_tool(
-                tool_name, actual_version, tool_dir, temp_download_path
+                tool_name, actual_version, tool_version_dir, temp_download_path
             )
-        elif asset_name.endswith((".tar.gz", ".zip")):
-            if not extract_archive(temp_download_path, tool_dir):
-                return None
-            executable_path = find_executable_in_extracted(
-                tool_dir, tool_name, system_os
+        elif any(
+            asset_name.lower().endswith(ext)
+            for ext in [".tar.gz", ".zip", ".tar.xz", ".tgz"]
+        ):
+            # Extract and find executable within the extracted directory
+            executable_path = extract_archive(
+                temp_download_path, tool_version_dir, tool_name, system_os
             )
         else:
-            move_target_path = os.path.join(tool_dir, asset_name)
+            # Assume it's a direct executable (e.g., .exe, or a binary with no extension)
+            # Move it directly into the tool_version_dir, renaming it to the tool_name for simplicity
+            final_binary_name = (
+                f"{tool_name}.exe" if system_os == "Windows" else tool_name
+            )
+            move_target_path = os.path.join(tool_version_dir, final_binary_name)
             try:
                 shutil.move(temp_download_path, move_target_path)
                 executable_path = move_target_path
+                if system_os != "Windows":
+                    os.chmod(executable_path, 0o755)  # Make executable on Unix-like
+                logger.info(f"Installed direct executable to: {executable_path}")
             except shutil.Error as e:
-                logger.error(f"Error moving file: {e}")
+                logger.error(f"Error moving direct executable {asset_name}: {e}")
                 return None
 
     if executable_path:
-        if system_os != "Windows" and install_type == "binary":
-            try:
-                os.chmod(
-                    executable_path,
-                    stat.S_IRWXU
-                    | stat.S_IRGRP
-                    | stat.S_IXGRP
-                    | stat.S_IROTH
-                    | stat.S_IXOTH,
-                )
-            except OSError as e:
-                logger.warning(f"Could not set permissions for {executable_path}: {e}")
+        # Update config with new installation details
         tool_configs["tools"][tool_key] = ToolInfo(
             tool_name=tool_name.lower(),
             repo=repo_full_name,
@@ -554,8 +745,10 @@ def install_or_update_tool(
         )
         return executable_path
     else:
-        logger.error(f"Installation failed for {tool_name} {actual_version}.")
-        shutil.rmtree(tool_dir, ignore_errors=True)
+        logger.error(
+            f"Installation failed for {tool_name} {actual_version}. Cleaning up."
+        )
+        shutil.rmtree(tool_version_dir, ignore_errors=True)  # Clean up partial install
         return None
 
 
@@ -574,10 +767,12 @@ def find_tool_executable(
     if actual_key and actual_key in tool_configs["tools"]:
         found_info = tool_configs["tools"][actual_key]
         logger.debug(f"Direct match found for key: {actual_key}")
-    elif not actual_key:  # Bare repo name provided
+    elif not actual_key:  # Bare repo name provided, find the latest installed version
         latest_info: Optional[ToolInfo] = None
         last_time: Optional[datetime] = None
         for key, info in tool_configs["tools"].items():
+            # Check if this tool is for the same repo, ignoring version suffix
+            # e.g., "owner/repo:v1.0.0" and "owner/repo" should match the repo part
             if info["repo"].lower() == repo.lower():
                 current_time = datetime.fromisoformat(
                     info.get("last_accessed", "1970-01-01T00:00:00")
@@ -614,10 +809,19 @@ def check_for_updates(tool_configs: ToolerConfig) -> None:
         return
     logger.info(f"Checking for tools not updated in >{update_days} days...")
     now, updates_found = datetime.now(), []
+    # Using list() to iterate over a copy of keys, allowing modification during iteration
     for key, info in list(tool_configs["tools"].items()):
-        if ":" in key:
-            continue  # Skip fixed versions
-        if (now - datetime.fromisoformat(info["last_accessed"])).days > update_days:
+        # Only check tools installed as 'latest' or without a specific version in their key
+        # (This logic implies that 'latest' tools don't have a version in their key, which is defined by tool_key logic)
+        # If the tool_key contains a specific version (e.g., "repo:v1.2.3"), it's considered pinned.
+        if ":" in key:  # This means it's a version-pinned tool
+            continue
+
+        last_accessed_dt = datetime.fromisoformat(info["last_accessed"])
+        if (now - last_accessed_dt).days > update_days:
+            logger.debug(
+                f"Checking for update for {info['repo']} (current: {info['version']})"
+            )
             if (release := get_gh_release_info(info["repo"], "latest")) and (
                 tag := release.get("tag_name")
             ):
@@ -625,8 +829,16 @@ def check_for_updates(tool_configs: ToolerConfig) -> None:
                     updates_found.append(
                         f"Tool {info['tool_name']} ({info['repo']}) has update: {info['version']} -> {tag}"
                     )
-            info["last_accessed"] = now.isoformat()
-            save_tool_configs(tool_configs)
+                # Always update last_accessed after checking, regardless of if an update was found
+                info["last_accessed"] = now.isoformat()
+                save_tool_configs(
+                    tool_configs
+                )  # Save config after each update check to persist last_accessed
+            else:
+                logger.warning(
+                    f"Could not get latest release for {info['repo']} during update check."
+                )
+
     if updates_found:
         print("\n--- Tool Updates Available ---", file=sys.stderr)
         for msg in updates_found:
@@ -645,7 +857,7 @@ def list_installed_tools(tool_configs: ToolerConfig) -> None:
     print("--- Installed Tooler Tools ---")
     if not tool_configs["tools"]:
         return print("  No tools installed yet.")
-    for key, info in sorted(
+    for _, info in sorted(
         tool_configs["tools"].items(), key=lambda i: i[1]["repo"].lower()
     ):
         print(
@@ -667,14 +879,31 @@ def remove_tool(tool_configs: ToolerConfig, tool_query: str) -> bool:
         return not logger.error(f"Tool '{tool_query}' not found.")
     for key in keys_to_remove:
         info = tool_configs["tools"][key]
-        tool_dir = (
-            os.path.dirname(info["executable_path"])
-            if info.get("install_type") == "python-venv"
-            else os.path.dirname(os.path.dirname(info["executable_path"]))
+        # The tool_dir now correctly points to the version-specific installation folder
+        # For python-venv, the shim is in tool_dir, and .venv is inside.
+        # For binary, the executable is directly in tool_dir or a subfolder.
+        # In both cases, removing `tool_version_dir` (which is `os.path.dirname(info["executable_path"])`
+        # or its parent if the binary is nested one level down from the version dir) is appropriate.
+
+        # Determine the root installation directory for this version
+        # It's safest to base this off the 'executable_path' recorded.
+        # The structure is `get_tooler_tools_dir()/repo__name/version/executable_path_inside`
+        # So we need to go up from `executable_path` until we hit the `version` directory.
+
+        # A safer approach for removal: reconstruct the base tool version directory
+        tool_install_base_dir = os.path.join(
+            get_tooler_tools_dir(), info["repo"].replace("/", "__")
         )
-        if os.path.exists(tool_dir):
-            logger.info(f"Removing directory: {tool_dir}")
-            shutil.rmtree(tool_dir, ignore_errors=True)
+        tool_version_dir = os.path.join(tool_install_base_dir, info["version"])
+
+        if os.path.exists(tool_version_dir):
+            logger.info(f"Removing directory: {tool_version_dir}")
+            shutil.rmtree(tool_version_dir, ignore_errors=True)
+        else:
+            logger.warning(
+                f"Tool directory not found, assuming already removed: {tool_version_dir}"
+            )
+
         del tool_configs["tools"][key]
     save_tool_configs(tool_configs)
     logger.info(f"Tool(s) for '{tool_query}' removed successfully.")
@@ -688,14 +917,14 @@ def main() -> None:
         description="A CLI tool manager for GitHub Releases.",
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="""Examples:
-  tooler run nektos/act                 # Run latest version
+  tooler run nektos/act              # Run latest version
   tooler run nektos/act:v0.2.79 -- help # Run specific version with args
-  tooler run adrienverge/yamllint       # Run Python tool from .whl asset
+  tooler run adrienverge/yamllint    # Run Python tool from .whl asset
 
-  tooler list                           # List all installed tools
-  tooler update nektos/act              # Update to latest version
-  tooler update --all                   # Update all non-pinned tools
-  tooler remove nektos/act              # Remove all versions of a tool
+  tooler list                        # List all installed tools
+  tooler update nektos/act           # Update to latest version
+  tooler update --all                # Update all non-pinned tools
+  tooler remove nektos/act           # Remove all versions of a tool
 """,
     )
     parser.add_argument(
@@ -764,8 +993,15 @@ def main() -> None:
     logger.addHandler(ch)
 
     tool_configs = load_tool_configs()
+    # Perform update check only if `run` or `update` command is used,
+    # and if it's not a `run` with a pinned version.
     if args.command in ["run", "update"]:
-        check_for_updates(tool_configs)
+        if (
+            args.command == "run" and ":" in args.tool_id
+        ):  # A specific version is requested
+            logger.debug(f"Skipping update check for pinned tool: {args.tool_id}")
+        else:
+            check_for_updates(tool_configs)
 
     if args.command == "list":
         list_installed_tools(tool_configs)
@@ -776,18 +1012,17 @@ def main() -> None:
             logger.info("Updating all applicable tools...")
             updated_count = 0
             for key, info in list(tool_configs["tools"].items()):
+                # Only update tools that are not version-pinned in the config
                 if ":" not in key:
-                    updated_count += (
-                        1
-                        if install_or_update_tool(
-                            tool_configs,
-                            info["tool_name"],
-                            info["repo"],
-                            "latest",
-                            True,
-                        )
-                        else 0
+                    updated = install_or_update_tool(
+                        tool_configs,
+                        info["tool_name"],
+                        info["repo"],
+                        "latest",
+                        True,
                     )
+                    if updated:
+                        updated_count += 1
             logger.info(
                 f"Update process finished. {updated_count} tool(s) were checked/updated."
             )
@@ -849,16 +1084,30 @@ def main() -> None:
             logger.info(
                 f"Tool {args.tool_id} not found locally or is corrupted. Attempting to install..."
             )
-            if not install_or_update_tool(
+            tool_info_path = install_or_update_tool(  # Catch the returned path
                 tool_configs, tool_name, repo_full_name, version=version_req
-            ):
+            )
+            if (
+                not tool_info_path
+            ):  # Check if install_or_update_tool returned a valid path
                 sys.exit(1)
+            # Re-load config and find tool info after installation to ensure it's up-to-date
             tool_info = find_tool_executable(load_tool_configs(), args.tool_id)
-        if tool_info:
+
+        if (
+            tool_info and tool_info["executable_path"]
+        ):  # Ensure executable_path is not None
             cmd = [tool_info["executable_path"]] + args.tool_args
             logger.debug(f"Executing: {cmd}")
             try:
+                # Use subprocess.run directly as we expect the tool's output to go to stdout/stderr
+                # and its exit code to be the primary result.
                 sys.exit(subprocess.run(cmd).returncode)
+            except FileNotFoundError:
+                logger.error(
+                    f"Executable not found at '{tool_info['executable_path']}'. It might have been moved or deleted."
+                )
+                sys.exit(1)
             except Exception as e:
                 logger.error(
                     f"Error executing tool '{tool_info['executable_path']}': {e}"
