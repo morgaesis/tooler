@@ -17,10 +17,7 @@ Never manually download, extract, or mess with `$PATH` again.
 Just run `install.sh`!
 
 ```bash
-# Get the installer (adjust URL if needed)
-curl -fsSL https://raw.githubusercontent.com/morgaesis/tooler/main/install.sh -o install.sh
-chmod +x install.sh
-./install.sh
+curl -fsSL https://raw.githubusercontent.com/morgaesis/tooler/main/install.sh | bash -
 ```
 
 ## 🚀 Usage
