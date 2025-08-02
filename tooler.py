@@ -12,6 +12,7 @@ import tarfile
 import tempfile
 import zipfile
 from datetime import datetime
+from importlib import metadata
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
@@ -365,6 +366,11 @@ def find_asset_for_platform(
     for asset in assets:
         if asset.get("name", "").lower().endswith(".whl"):
             logger.warning("Falling back to Python wheel.")
+            return asset.get("browser_download_url"), asset.get("name")
+        elif (
+            asset.get("name", "").lower().split(".tar")[0]
+            == repo_full_name.split("/").pop()
+        ):
             return asset.get("browser_download_url"), asset.get("name")
 
     logger.error("No suitable asset found after all checks.")
@@ -975,8 +981,20 @@ def main() -> None:
     config_set_parser.add_argument(
         "key_value", help="Key=Value pair (e.g., 'update_check_days=30')."
     )
+    subparsers.add_parser(
+        "version",
+        help="Show the current version",
+    )
 
     args = parser.parse_args()
+
+    if args.command == "version":
+        try:
+            version = metadata.version("tooler")
+        except metadata.PackageNotFoundError:
+            version = "unknown"
+        print(f"tooler v{version}")
+        return
 
     ch = logging.StreamHandler(sys.stderr)
     ch.setFormatter(ToolerFormatter())

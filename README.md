@@ -14,10 +14,17 @@ Never manually download, extract, or mess with `$PATH` again.
 
 ## 🛠️ Install
 
-Just run `install.sh`!
+Just use `tooler` to run itself:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/morgaesis/tooler/main/install.sh | bash -
+tooler run morgaesis/tooler run ...
+```
+
+For the first run:
+
+```bash
+curl -sLo- https://github.com/morgaesis/tooler/releases/latest/download/tooler.tar.gz | tar -xzf-
+mv ./tooler ~/.local/bin
 ```
 
 ## 🚀 Usage
