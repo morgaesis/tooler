@@ -1,0 +1,28 @@
+name: Push
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          cache: "pip"
+      - run: |
+          rm -rf .venv/
+          python3 -m venv .venv/
+          . ./.venv/bin/activate
+          pip install pex
+          mkdir -p dist/
+          pex . -r requirements.txt -e tooler:main -o dist/tooler
+          deactivate
+          cd dist && tar -czf tooler.tar.gz tooler
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/tooler.tar.gz
