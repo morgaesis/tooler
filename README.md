@@ -17,14 +17,13 @@ Never manually download, extract, or mess with `$PATH` again.
 Just use `tooler` to run itself:
 
 ```bash
-tooler run morgaesis/tooler run ...
+tooler run morgaesis/tooler -h
 ```
 
 For the first run:
 
 ```bash
-curl -sLo- https://github.com/morgaesis/tooler/releases/latest/download/tooler.tar.gz | tar -xzf-
-mv ./tooler ~/.local/bin
+curl -sLo- https://raw.githubusercontent.com/morgaesis/tooler/refs/heads/main/install.sh | bash
 ```
 
 ## 🚀 Usage
