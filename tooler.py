@@ -273,14 +273,13 @@ def find_asset_for_platform(
     system_arch: str,
 ) -> Tuple[Optional[str], Optional[str]]:
     """
-    Finds the best binary asset by prioritizing archives over packages.
+    Finds the best asset by prioritizing archives, then binaries, then packages.
 
     Matching Priority:
     1. Archive (OS + Arch)
-    2. Package (OS + Arch)
-    3. Archive (OS only)
-    4. Package (OS only)
-    5. And so on for Arch only, then .whl fallback.
+    2. Binary (OS + Arch)
+    3. Package (OS + Arch)
+    4. ... and so on for OS only, Arch only, then fallbacks.
 
     Returns:
         A tuple containing the asset's download URL and name, or (None, None).
@@ -300,10 +299,13 @@ def find_asset_for_platform(
     # --- 1. Categorize all assets in a single pass ---
     candidates = {
         "os_arch_archive": [],
+        "os_arch_binary": [],
         "os_arch_package": [],
         "os_only_archive": [],
+        "os_only_binary": [],
         "os_only_package": [],
         "arch_only_archive": [],
+        "arch_only_binary": [],
         "arch_only_package": [],
     }
 
@@ -317,32 +319,44 @@ def find_asset_for_platform(
 
         is_archive = name_lower.endswith(ARCHIVE_EXTS)
         is_package = name_lower.endswith(PACKAGE_EXTS)
+        is_binary = (
+            not is_archive and not is_package
+        )  # Treat what's left as a direct binary
 
         # Assign asset to the correct category
         if has_os and has_arch:
             if is_archive:
                 candidates["os_arch_archive"].append(asset)
+            elif is_binary:
+                candidates["os_arch_binary"].append(asset)
             elif is_package:
                 candidates["os_arch_package"].append(asset)
         elif has_os:
             if is_archive:
                 candidates["os_only_archive"].append(asset)
+            elif is_binary:
+                candidates["os_only_binary"].append(asset)
             elif is_package:
                 candidates["os_only_package"].append(asset)
         elif has_arch:
             if is_archive:
                 candidates["arch_only_archive"].append(asset)
+            elif is_binary:
+                candidates["arch_only_binary"].append(asset)
             elif is_package:
                 candidates["arch_only_package"].append(asset)
 
     # --- 2. Select the first asset from the highest-priority list found ---
-    # The order of this list defines our preference
+    # The order of this list defines our preference: archive > binary > package
     priority_order = [
         "os_arch_archive",
+        "os_arch_binary",
         "os_arch_package",
         "os_only_archive",
+        "os_only_binary",
         "os_only_package",
         "arch_only_archive",
+        "arch_only_binary",
         "arch_only_package",
     ]
 
@@ -366,11 +380,6 @@ def find_asset_for_platform(
     for asset in assets:
         if asset.get("name", "").lower().endswith(".whl"):
             logger.warning("Falling back to Python wheel.")
-            return asset.get("browser_download_url"), asset.get("name")
-        elif (
-            asset.get("name", "").lower().split(".tar")[0]
-            == repo_full_name.split("/").pop()
-        ):
             return asset.get("browser_download_url"), asset.get("name")
 
     logger.error("No suitable asset found after all checks.")
@@ -634,6 +643,7 @@ def install_or_update_tool(
     repo_full_name: str,
     version: str = "latest",
     force_update: bool = False,
+    asset_override: Optional[str] = None,
 ) -> Optional[str]:
     """Downloads and prepares a tool from a GitHub release."""
     system_os, system_arch = platform.system(), get_system_arch()
@@ -646,7 +656,7 @@ def install_or_update_tool(
         return None
 
     tool_key = (
-        f"{repo_full_name}:v{actual_version}"
+        f"{repo_full_name}:{actual_version}"
         if version == "latest"
         else f"{repo_full_name}:{version}"
     )
@@ -657,7 +667,11 @@ def install_or_update_tool(
     )
     tool_version_dir = os.path.join(tool_install_base_dir, actual_version)
 
-    if not force_update and (current_info := tool_configs["tools"].get(tool_key)):
+    if (
+        not force_update
+        and not asset_override
+        and (current_info := tool_configs["tools"].get(tool_key))
+    ):
         if (
             "executable_path" in current_info
             and os.path.exists(current_info["executable_path"])
@@ -673,12 +687,29 @@ def install_or_update_tool(
     logger.info(f"Installing/Updating {tool_name} {actual_version}...")
 
     # Find the most suitable asset for the platform
-    download_url, asset_name = find_asset_for_platform(
-        release_info.get("assets", []),
-        repo_full_name,
-        system_arch,
-        system_os,
-    )
+    download_url, asset_name = None, None
+    assets = release_info.get("assets", [])
+
+    if asset_override:
+        logger.info(f"Attempting to use specified asset override: '{asset_override}'")
+        found_asset = next((a for a in assets if a.get("name") == asset_override), None)
+        if found_asset:
+            download_url = found_asset.get("browser_download_url")
+            asset_name = found_asset.get("name")
+            logger.info(f"Found specified asset '{asset_name}'")
+        else:
+            logger.error(
+                f"Specified asset '{asset_override}' not found in release assets."
+            )
+            asset_names_list = [a.get("name", "unnamed") for a in assets]
+            logger.debug(f"Available assets: {asset_names_list}")
+            return None
+    else:
+        # Pass system_os first, then system_arch
+        download_url, asset_name = find_asset_for_platform(
+            assets, repo_full_name, system_os, system_arch
+        )
+
     if not download_url or not asset_name:
         logger.error(
             f"No suitable asset found for {repo_full_name} {actual_version} for your platform."
@@ -713,6 +744,7 @@ def install_or_update_tool(
             asset_name.lower().endswith(ext)
             for ext in [".tar.gz", ".zip", ".tar.xz", ".tgz"]
         ):
+            install_type = "archive"
             # Extract and find executable within the extracted directory
             executable_path = extract_archive(
                 temp_download_path, tool_version_dir, tool_name, system_os
@@ -923,14 +955,15 @@ def main() -> None:
         description="A CLI tool manager for GitHub Releases.",
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="""Examples:
-  tooler run nektos/act              # Run latest version
-  tooler run nektos/act:v0.2.79 -- help # Run specific version with args
-  tooler run adrienverge/yamllint    # Run Python tool from .whl asset
+  tooler run nektos/act                                     # Run latest version
+  tooler run nektos/act:v0.2.79 -- help                     # Run specific version with args
+  tooler run adrienverge/yamllint                           # Run Python tool from .whl asset
+  tooler run argoproj/argo-cd --asset argocd-darwin-amd64 # Run with an explicit asset
 
-  tooler list                        # List all installed tools
-  tooler update nektos/act           # Update to latest version
-  tooler update --all                # Update all non-pinned tools
-  tooler remove nektos/act           # Remove all versions of a tool
+  tooler list                                               # List all installed tools
+  tooler update nektos/act                                  # Update to latest version
+  tooler update --all                                       # Update all non-pinned tools
+  tooler remove nektos/act                                  # Remove all versions of a tool
 """,
     )
     parser.add_argument(
@@ -953,6 +986,9 @@ def main() -> None:
     )
     run_parser.add_argument(
         "tool_args", nargs=argparse.REMAINDER, help="Arguments to pass to tool."
+    )
+    run_parser.add_argument(
+        "--asset", help="Explicitly specify asset name from the release to download."
     )
     subparsers.add_parser("list", help="List all installed tools.")
     update_parser = subparsers.add_parser("update", help="Update one or all tools.")
@@ -1098,23 +1134,27 @@ def main() -> None:
         )
         version_req = args.tool_id.split(":", 1)[1] if ":" in args.tool_id else "latest"
         tool_info = find_tool_executable(tool_configs, args.tool_id)
-        if not tool_info:
-            logger.info(
-                f"Tool {args.tool_id} not found locally or is corrupted. Attempting to install..."
+
+        # Always re-install if --asset is used, otherwise only if tool isn't found/corrupt.
+        if not tool_info or args.asset:
+            if not tool_info:
+                logger.info(
+                    f"Tool {args.tool_id} not found locally or is corrupted. Attempting to install..."
+                )
+
+            tool_info_path = install_or_update_tool(
+                tool_configs,
+                tool_name,
+                repo_full_name,
+                version=version_req,
+                asset_override=args.asset,
             )
-            tool_info_path = install_or_update_tool(  # Catch the returned path
-                tool_configs, tool_name, repo_full_name, version=version_req
-            )
-            if (
-                not tool_info_path
-            ):  # Check if install_or_update_tool returned a valid path
+            if not tool_info_path:
                 sys.exit(1)
             # Re-load config and find tool info after installation to ensure it's up-to-date
             tool_info = find_tool_executable(load_tool_configs(), args.tool_id)
 
-        if (
-            tool_info and tool_info["executable_path"]
-        ):  # Ensure executable_path is not None
+        if tool_info and tool_info["executable_path"]:
             cmd = [tool_info["executable_path"]] + args.tool_args
             logger.debug(f"Executing: {cmd}")
             try:
