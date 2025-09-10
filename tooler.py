@@ -795,6 +795,7 @@ def find_tool_executable(
 ) -> Optional[ToolInfo]:
     """Finds the tool_info dict for a tool based on the query."""
     repo, actual_key = tool_query.split(":")[0], None
+    tool_name = repo.split("/")[-1]
     if ":" in tool_query:
         version = tool_query.split(":")[1]
         if not version.startswith("v") and version.lower() != "latest":
@@ -811,7 +812,7 @@ def find_tool_executable(
         for key, info in tool_configs["tools"].items():
             # Check if this tool is for the same repo, ignoring version suffix
             # e.g., "owner/repo:v1.0.0" and "owner/repo" should match the repo part
-            if info["repo"].lower() == repo.lower():
+            if info["tool_name"].lower() == tool_name.lower():
                 current_time = datetime.fromisoformat(
                     info.get("last_accessed", "1970-01-01T00:00:00")
                 )
@@ -959,9 +960,12 @@ def main() -> None:
   tooler run nektos/act:v0.2.79 -- --help                   # Run specific version with args
   tooler run adrienverge/yamllint                           # Run Python tool from .whl asset
   tooler run argoproj/argo-cd --asset argocd-darwin-amd64   # Run with an explicit asset
+  tooler run yamllint .                                     # Run a tool previously fetched
+  tooler -v run act                                         # Run verbosely
 
   tooler list                                               # List all installed tools
   tooler update nektos/act                                  # Update to latest version
+  tooler update yamllint                                    # Update short-name to latest version
   tooler update --all                                       # Update all non-pinned tools
   tooler remove nektos/act                                  # Remove all versions of a tool
 """,
@@ -1047,6 +1051,21 @@ def main() -> None:
     logger.addHandler(ch)
 
     tool_configs = load_tool_configs()
+
+    def _get_tool_names(tool_id: str):
+        """Get tool name and repo name from stored config, failing if not found.
+        Useful for running with short-names
+        """
+        tool_name = tool_id.split("/")[-1].split(":")[0]
+        logger.debug(f"Looking up tool '{tool_name}' in local tools...")
+        for _, tool in list(tool_configs["tools"].items()):
+            if tool_name == tool.get("tool_name"):
+                return (tool_name, tool.get("repo"))
+        logger.error(
+            f"Couldn't find existing tool '{tool_id}', please use <repo/tool> style"
+        )
+        sys.exit(1)
+
     # Perform update check only if `run` or `update` command is used,
     # and if it's not a `run` with a pinned version.
     if args.command in ["run", "update"]:
@@ -1081,10 +1100,7 @@ def main() -> None:
                 f"Update process finished. {updated_count} tool(s) were checked/updated."
             )
         elif args.tool_id:
-            repo_full_name, tool_name = (
-                args.tool_id.split(":")[0],
-                args.tool_id.split("/")[-1].split(":")[0],
-            )
+            tool_name, repo_full_name = _get_tool_names(args.tool_id)
             logger.info(f"Attempting to update {args.tool_id}...")
             if install_or_update_tool(
                 tool_configs, tool_name, repo_full_name, "latest", True
@@ -1128,10 +1144,7 @@ def main() -> None:
             else:
                 logger.error("Invalid format. Use 'key=value'.")
     elif args.command == "run":
-        repo_full_name, tool_name = (
-            args.tool_id.split(":")[0],
-            args.tool_id.split("/")[-1].split(":")[0],
-        )
+        tool_name, repo_full_name = _get_tool_names(args.tool_id)
         version_req = args.tool_id.split(":", 1)[1] if ":" in args.tool_id else "latest"
         tool_info = find_tool_executable(tool_configs, args.tool_id)
 
