@@ -956,9 +956,9 @@ def main() -> None:
         formatter_class=argparse.RawTextHelpFormatter,
         epilog="""Examples:
   tooler run nektos/act                                     # Run latest version
-  tooler run nektos/act:v0.2.79 -- help                     # Run specific version with args
+  tooler run nektos/act:v0.2.79 -- --help                   # Run specific version with args
   tooler run adrienverge/yamllint                           # Run Python tool from .whl asset
-  tooler run argoproj/argo-cd --asset argocd-darwin-amd64 # Run with an explicit asset
+  tooler run argoproj/argo-cd --asset argocd-darwin-amd64   # Run with an explicit asset
 
   tooler list                                               # List all installed tools
   tooler update nektos/act                                  # Update to latest version
@@ -1028,7 +1028,7 @@ def main() -> None:
         try:
             version = metadata.version("tooler")
         except metadata.PackageNotFoundError:
-            version = "unknown"
+            version = "?.?.?"
         print(f"tooler v{version}")
         return
 
