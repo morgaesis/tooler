@@ -1061,10 +1061,8 @@ def main() -> None:
         for _, tool in list(tool_configs["tools"].items()):
             if tool_name == tool.get("tool_name"):
                 return (tool_name, tool.get("repo"))
-        logger.error(
-            f"Couldn't find existing tool '{tool_id}', please use <repo/tool> style"
-        )
-        sys.exit(1)
+        logger.info(f"Couldn't find existing tool '{tool_id}'")
+        return (tool_name, tool_id)
 
     # Perform update check only if `run` or `update` command is used,
     # and if it's not a `run` with a pinned version.
