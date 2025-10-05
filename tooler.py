@@ -5,6 +5,7 @@ import logging
 import os
 import platform
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -958,6 +959,11 @@ def remove_tool(tool_configs: ToolerConfig, tool_query: str) -> bool:
 
 
 # --- Main CLI ---
+def sigint_handler(sig, frame):
+    logger.debug("Graceful exit due to SIGINT")
+    sys.exit(130)
+
+
 def main() -> None:
     """Main entrypoint for the tooler CLI."""
     parser = argparse.ArgumentParser(
@@ -1057,6 +1063,9 @@ def main() -> None:
     if logger.hasHandlers():
         logger.handlers.clear()
     logger.addHandler(ch)
+
+    # Handle SIGINT gracefully
+    signal.signal(signal.SIGINT, sigint_handler)
 
     tool_configs = load_tool_configs()
 
@@ -1179,7 +1188,10 @@ def main() -> None:
             try:
                 # Use subprocess.run directly as we expect the tool's output to go to stdout/stderr
                 # and its exit code to be the primary result.
-                sys.exit(subprocess.run(cmd).returncode)
+                original_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
+                result = subprocess.run(cmd)
+                signal.signal(signal.SIGINT, original_handler)
+                sys.exit(result.returncode)
             except FileNotFoundError:
                 logger.error(
                     f"Executable not found at '{tool_info['executable_path']}'. It might have been moved or deleted."
@@ -1190,6 +1202,7 @@ def main() -> None:
                     f"Error executing tool '{tool_info['executable_path']}': {e}"
                 )
                 sys.exit(1)
+
         else:
             logger.error(f"Failed to find or install executable for {args.tool_id}.")
             sys.exit(1)
