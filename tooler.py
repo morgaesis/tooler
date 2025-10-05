@@ -534,9 +534,9 @@ def system_is_executable(filepath: str, os_system: str) -> bool:
         return filepath.lower().endswith((".exe", ".bat", ".cmd")) and os.path.isfile(
             filepath
         )
-    # For Unix-like systems, check if it's a regular file and has execute permission
+    # For Unix-like systems, check if it's a regular file
     # Also, avoid common library extensions explicitly for robustness
-    if os.path.isfile(filepath) and os.access(filepath, os.X_OK):
+    if os.path.isfile(filepath):
         # Exclude shared libraries unless explicitly looking for them (which we are not here)
         if filepath.lower().endswith((".dll", ".so", ".dylib")):
             return False
@@ -734,6 +734,14 @@ def install_or_update_tool(
         temp_download_path = os.path.join(temp_dir, asset_name)
         if not download_file(download_url, temp_download_path):
             return None
+
+        # Cache the downloaded file in the tool version directory
+        cached_asset_path = os.path.join(tool_version_dir, asset_name)
+        try:
+            shutil.copy(temp_download_path, cached_asset_path)
+            logger.debug(f"Cached downloaded asset to: {cached_asset_path}")
+        except shutil.Error as e:
+            logger.warning(f"Failed to cache asset {asset_name}: {e}")
 
         if asset_name.lower().endswith(".whl"):
             install_type = "python-venv"
