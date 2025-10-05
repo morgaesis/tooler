@@ -39,6 +39,8 @@ class ToolInfo(TypedDict):
 
 class ToolerSettings(TypedDict):
     update_check_days: int
+    auto_shim: bool
+    shim_dir: str
 
 
 class ToolerConfig(TypedDict):
@@ -143,24 +145,36 @@ def get_tooler_tools_dir() -> str:
 def load_tool_configs() -> ToolerConfig:
     """Loads tool configurations from the JSON file."""
     config_path = get_tooler_config_file_path()
+    shim_dir_default = os.path.join(os.path.expanduser("~"), ".local", "bin")
     if not os.path.exists(config_path):
         return ToolerConfig(
-            tools={}, settings={"update_check_days": DEFAULT_UPDATE_CHECK_DAYS}
+            tools={}, settings={"update_check_days": DEFAULT_UPDATE_CHECK_DAYS, "auto_shim": False, "shim_dir": shim_dir_default}
         )
     try:
         with open(config_path, "r") as f:
             config_data = json.load(f)
             config_data.setdefault("tools", {})
-            config_data.setdefault("settings", {}).setdefault(
-                "update_check_days", DEFAULT_UPDATE_CHECK_DAYS
-            )
+            settings = config_data.setdefault("settings", {})
+            settings.setdefault("update_check_days", DEFAULT_UPDATE_CHECK_DAYS)
+            settings.setdefault("auto_shim", False)
+            settings.setdefault("shim_dir", shim_dir_default)
+            # Override with environment variables if set
+            if "TOOLER_UPDATE_CHECK_DAYS" in os.environ:
+                try:
+                    settings["update_check_days"] = int(os.environ["TOOLER_UPDATE_CHECK_DAYS"])
+                except ValueError:
+                    pass
+            if "TOOLER_AUTO_SHIM" in os.environ:
+                settings["auto_shim"] = os.environ["TOOLER_AUTO_SHIM"].lower() in ("true", "1", "yes")
+            if "TOOLER_SHIM_DIR" in os.environ:
+                settings["shim_dir"] = os.environ["TOOLER_SHIM_DIR"]
             return config_data  # type: ignore
     except (json.JSONDecodeError, TypeError):
         logger.error(
             f"Could not parse config file at {config_path}. Starting with empty config."
         )
         return ToolerConfig(
-            tools={}, settings={"update_check_days": DEFAULT_UPDATE_CHECK_DAYS}
+            tools={}, settings={"update_check_days": DEFAULT_UPDATE_CHECK_DAYS, "auto_shim": False, "shim_dir": shim_dir_default}
         )
 
 
@@ -170,6 +184,43 @@ def save_tool_configs(configs: ToolerConfig) -> None:
     os.makedirs(os.path.dirname(config_path), exist_ok=True)
     with open(config_path, "w") as f:
         json.dump(configs, f, indent=2)
+
+
+# --- Shim Management ---
+def create_shim_script(shim_dir: str) -> str:
+    """Creates the tooler-shim script if it doesn't exist."""
+    if platform.system() == "Windows":
+        shim_path = os.path.join(shim_dir, "tooler-shim.cmd")
+        if not os.path.exists(shim_path):
+            os.makedirs(shim_dir, exist_ok=True)
+            with open(shim_path, "w") as f:
+                f.write("@echo off\r\n")
+                f.write("set tool_name=%~n0\r\n")
+                f.write("tooler run %tool_name% %*\r\n")
+            logger.info(f"Created shim script at {shim_path}")
+    else:
+        shim_path = os.path.join(shim_dir, "tooler-shim")
+        if not os.path.exists(shim_path):
+            os.makedirs(shim_dir, exist_ok=True)
+            with open(shim_path, "w") as f:
+                f.write("#!/bin/bash\n")
+                f.write('tool_name=$(basename "$0")\n')
+                f.write('exec tooler run "$tool_name" "$@"\n')
+            os.chmod(shim_path, 0o755)
+            logger.info(f"Created shim script at {shim_path}")
+    return shim_path
+
+
+def create_tool_symlink(shim_dir: str, tool_name: str, shim_path: str) -> None:
+    """Creates a symlink for the tool to the shim script if it doesn't exist."""
+    symlink_path = os.path.join(shim_dir, tool_name)
+    if not os.path.exists(symlink_path):
+        os.makedirs(shim_dir, exist_ok=True)
+        try:
+            os.symlink(shim_path, symlink_path)
+            logger.info(f"Created symlink {symlink_path} -> {shim_path}")
+        except OSError as e:
+            logger.warning(f"Could not create symlink {symlink_path}: {e}")
 
 
 # --- Platform and Architecture Utilities ---
@@ -982,6 +1033,10 @@ def main() -> None:
   tooler update yamllint                                    # Update short-name to latest version
   tooler update --all                                       # Update all non-pinned tools
   tooler remove nektos/act                                  # Remove all versions of a tool
+
+  tooler config get                                         # Show all settings
+  tooler config set auto_shim=true                          # Enable auto-shimming
+  tooler config set shim_dir=/home/user/.local/bin          # Set shim directory
 """,
     )
     parser.add_argument(
@@ -1143,6 +1198,8 @@ def main() -> None:
             key, value_str = (
                 args.key_value.split("=", 1) if "=" in args.key_value else (None, None)
             )
+            if key:
+                key = key.lower().replace('-', '_')
             if key == "update_check_days" and value_str:
                 try:
                     tool_configs["settings"]["update_check_days"] = int(value_str)
@@ -1152,9 +1209,24 @@ def main() -> None:
                     logger.error(
                         "Invalid value for 'update_check_days'. Must be an integer."
                     )
+            elif key == "auto_shim" and value_str:
+                if value_str.lower() in ("true", "1", "yes"):
+                    tool_configs["settings"]["auto_shim"] = True
+                    save_tool_configs(tool_configs)
+                    logger.info(f"Setting '{key}' updated to 'True'.")
+                elif value_str.lower() in ("false", "0", "no"):
+                    tool_configs["settings"]["auto_shim"] = False
+                    save_tool_configs(tool_configs)
+                    logger.info(f"Setting '{key}' updated to 'False'.")
+                else:
+                    logger.error("Invalid value for 'auto_shim'. Must be true or false.")
+            elif key == "shim_dir" and value_str:
+                tool_configs["settings"]["shim_dir"] = value_str
+                save_tool_configs(tool_configs)
+                logger.info(f"Setting '{key}' updated to '{value_str}'.")
             elif key:
                 logger.error(
-                    f"'{key}' is not a valid configuration setting. Valid settings: 'update_check_days'"
+                    f"'{key}' is not a valid configuration setting. Valid settings: 'update_check_days', 'auto_shim', 'shim_dir'"
                 )
             else:
                 logger.error("Invalid format. Use 'key=value'.")
@@ -1183,6 +1255,10 @@ def main() -> None:
             tool_info = find_tool_executable(load_tool_configs(), args.tool_id)
 
         if tool_info and tool_info["executable_path"]:
+            # Create shim if auto_shim is enabled
+            if tool_configs["settings"]["auto_shim"] and platform.system() != "Windows":
+                shim_path = create_shim_script(tool_configs["settings"]["shim_dir"])
+                create_tool_symlink(tool_configs["settings"]["shim_dir"], tool_name, shim_path)
             cmd = [tool_info["executable_path"]] + args.tool_args
             logger.debug(f"Executing: {cmd}")
             try:
