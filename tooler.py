@@ -55,6 +55,25 @@ TOOLS_DIR_NAME = "tools"
 CONFIG_FILE_NAME = "config.json"
 DEFAULT_UPDATE_CHECK_DAYS = 60
 
+# Settings configuration: key -> (default_value, parser_func)
+SETTINGS_CONFIG = {
+    "update_check_days": (DEFAULT_UPDATE_CHECK_DAYS, int),
+    "auto_shim": (False, lambda x: x.lower() in ("true", "1", "yes")),
+    "shim_dir": (os.path.join(os.path.expanduser("~"), ".local", "bin"), str),
+}
+
+
+def normalize_key(key: str) -> str:
+    """Normalize key to snake_case from various formats (kebab, camel, pascal)."""
+    # Replace dashes with underscores
+    key = key.replace("-", "_")
+    # Convert camelCase/pascalCase to snake_case
+    import re
+
+    key = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", key)
+    return key.lower()
+
+
 # --- Global Paths (Lazy Initialization) ---
 _USER_DATA_DIR: Optional[str] = None
 _USER_CONFIG_DIR: Optional[str] = None
@@ -145,37 +164,31 @@ def get_tooler_tools_dir() -> str:
 def load_tool_configs() -> ToolerConfig:
     """Loads tool configurations from the JSON file."""
     config_path = get_tooler_config_file_path()
-    shim_dir_default = os.path.join(os.path.expanduser("~"), ".local", "bin")
     if not os.path.exists(config_path):
-        return ToolerConfig(
-            tools={}, settings={"update_check_days": DEFAULT_UPDATE_CHECK_DAYS, "auto_shim": False, "shim_dir": shim_dir_default}
-        )
+        settings = {k: v[0] for k, v in SETTINGS_CONFIG.items()}
+        return ToolerConfig(tools={}, settings=settings)  # type: ignore
     try:
         with open(config_path, "r") as f:
             config_data = json.load(f)
             config_data.setdefault("tools", {})
             settings = config_data.setdefault("settings", {})
-            settings.setdefault("update_check_days", DEFAULT_UPDATE_CHECK_DAYS)
-            settings.setdefault("auto_shim", False)
-            settings.setdefault("shim_dir", shim_dir_default)
+            for key, (default, _) in SETTINGS_CONFIG.items():
+                settings.setdefault(key, default)
             # Override with environment variables if set
-            if "TOOLER_UPDATE_CHECK_DAYS" in os.environ:
-                try:
-                    settings["update_check_days"] = int(os.environ["TOOLER_UPDATE_CHECK_DAYS"])
-                except ValueError:
-                    pass
-            if "TOOLER_AUTO_SHIM" in os.environ:
-                settings["auto_shim"] = os.environ["TOOLER_AUTO_SHIM"].lower() in ("true", "1", "yes")
-            if "TOOLER_SHIM_DIR" in os.environ:
-                settings["shim_dir"] = os.environ["TOOLER_SHIM_DIR"]
+            for key, (_, parser) in SETTINGS_CONFIG.items():
+                env_key = f"TOOLER_{key.upper()}"
+                if env_key in os.environ:
+                    try:
+                        settings[key] = parser(os.environ[env_key])
+                    except (ValueError, TypeError):
+                        pass  # ignore invalid env values
             return config_data  # type: ignore
     except (json.JSONDecodeError, TypeError):
         logger.error(
             f"Could not parse config file at {config_path}. Starting with empty config."
         )
-        return ToolerConfig(
-            tools={}, settings={"update_check_days": DEFAULT_UPDATE_CHECK_DAYS, "auto_shim": False, "shim_dir": shim_dir_default}
-        )
+        settings = {k: v[0] for k, v in SETTINGS_CONFIG.items()}
+        return ToolerConfig(tools={}, settings=settings)  # type: ignore
 
 
 def save_tool_configs(configs: ToolerConfig) -> None:
@@ -1037,6 +1050,7 @@ def main() -> None:
   tooler config get                                         # Show all settings
   tooler config set auto_shim=true                          # Enable auto-shimming
   tooler config set shim_dir=/home/user/.local/bin          # Set shim directory
+  tooler config unset shim_dir                              # Unset shim_dir (reverts to default)
 """,
     )
     parser.add_argument(
@@ -1090,6 +1104,10 @@ def main() -> None:
     config_set_parser.add_argument(
         "key_value", help="Key=Value pair (e.g., 'update_check_days=30')."
     )
+    config_unset_parser = config_subparsers.add_parser(
+        "unset", help="Unset a configuration setting (removes from config file)."
+    )
+    config_unset_parser.add_argument("key", help="Key to unset (e.g., 'shim-dir').")
     subparsers.add_parser(
         "version",
         help="Show the current version",
@@ -1107,7 +1125,19 @@ def main() -> None:
 
     ch = logging.StreamHandler(sys.stderr)
     ch.setFormatter(ToolerFormatter())
-    if args.quiet:
+    # Check for log level from environment variable
+    env_level = os.environ.get("TOOLER_LOG_LEVEL", "").lower()
+    level_map = {
+        "debug": logging.DEBUG,
+        "info": logging.INFO,
+        "warning": logging.WARNING,
+        "warn": logging.WARNING,
+        "error": logging.ERROR,
+        "critical": logging.CRITICAL,
+    }
+    if env_level in level_map:
+        ch.setLevel(level_map[env_level])
+    elif args.quiet:
         ch.setLevel(logging.ERROR)
     elif args.verbose == 0:
         ch.setLevel(logging.WARNING)
@@ -1199,37 +1229,34 @@ def main() -> None:
                 args.key_value.split("=", 1) if "=" in args.key_value else (None, None)
             )
             if key:
-                key = key.lower().replace('-', '_')
-            if key == "update_check_days" and value_str:
+                key = normalize_key(key)
+            if key in SETTINGS_CONFIG and value_str:
+                _, parser = SETTINGS_CONFIG[key]
                 try:
-                    tool_configs["settings"]["update_check_days"] = int(value_str)
+                    parsed_value = parser(value_str)
+                    tool_configs["settings"][key] = parsed_value
                     save_tool_configs(tool_configs)
-                    logger.info(f"Setting '{key}' updated to '{value_str}'.")
-                except ValueError:
-                    logger.error(
-                        "Invalid value for 'update_check_days'. Must be an integer."
-                    )
-            elif key == "auto_shim" and value_str:
-                if value_str.lower() in ("true", "1", "yes"):
-                    tool_configs["settings"]["auto_shim"] = True
-                    save_tool_configs(tool_configs)
-                    logger.info(f"Setting '{key}' updated to 'True'.")
-                elif value_str.lower() in ("false", "0", "no"):
-                    tool_configs["settings"]["auto_shim"] = False
-                    save_tool_configs(tool_configs)
-                    logger.info(f"Setting '{key}' updated to 'False'.")
-                else:
-                    logger.error("Invalid value for 'auto_shim'. Must be true or false.")
-            elif key == "shim_dir" and value_str:
-                tool_configs["settings"]["shim_dir"] = value_str
-                save_tool_configs(tool_configs)
-                logger.info(f"Setting '{key}' updated to '{value_str}'.")
+                    logger.info(f"Setting '{key}' updated to '{parsed_value}'.")
+                except (ValueError, TypeError):
+                    logger.error(f"Invalid value for '{key}'.")
             elif key:
+                valid_keys = ", ".join(f"'{k}'" for k in SETTINGS_CONFIG.keys())
                 logger.error(
-                    f"'{key}' is not a valid configuration setting. Valid settings: 'update_check_days', 'auto_shim', 'shim_dir'"
+                    f"'{key}' is not a valid configuration setting. Valid settings: {valid_keys}"
                 )
             else:
                 logger.error("Invalid format. Use 'key=value'.")
+        elif args.config_command == "unset":
+            key = normalize_key(args.key)
+            if key in SETTINGS_CONFIG:
+                del tool_configs["settings"][key]
+                save_tool_configs(tool_configs)
+                logger.info(f"Setting '{key}' unset.")
+            else:
+                valid_keys = ", ".join(f"'{k}'" for k in SETTINGS_CONFIG.keys())
+                logger.error(
+                    f"'{key}' is not a valid configuration setting. Valid settings: {valid_keys}"
+                )
     elif args.command == "run":
         tool_name, repo_full_name = _get_tool_names(args.tool_id)
         version_req = args.tool_id.split(":", 1)[1] if ":" in args.tool_id else "latest"
@@ -1258,7 +1285,9 @@ def main() -> None:
             # Create shim if auto_shim is enabled
             if tool_configs["settings"]["auto_shim"] and platform.system() != "Windows":
                 shim_path = create_shim_script(tool_configs["settings"]["shim_dir"])
-                create_tool_symlink(tool_configs["settings"]["shim_dir"], tool_name, shim_path)
+                create_tool_symlink(
+                    tool_configs["settings"]["shim_dir"], tool_name, shim_path
+                )
             cmd = [tool_info["executable_path"]] + args.tool_args
             logger.debug(f"Executing: {cmd}")
             try:
