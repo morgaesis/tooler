@@ -1,78 +1,151 @@
-# 🚀 Tooler: Your CLI Tool Sidekick
+# Tooler
 
-Tired of juggling CLI tools? `tooler` simplifies managing external binaries from GitHub Releases.
-Never manually download, extract, or mess with `$PATH` again.
+A CLI tool manager for GitHub Releases written in Rust.
 
-## ✨ Features
+## Features
 
-- **One-command run:** `tooler run owner/repo:vX.Y.Z` just works.
-- **Version Pinning:** `nektos/act:v0.2.79` for consistency.
-- **Smart Updates:** Auto-notifies for new versions. `tooler update --all` for the win.
-- **Cleanliness:** Organizes tools in your user data dir. Your `$PATH` stays pristine.
-- **Cross-Platform:** Linux 🐧, macOS 🍎, Windows 🪟.
-- **Dev-Friendly Logs:** Configurable verbosity. Errors/warnings by default.
+- **Tool Management**: Install, update, and remove tools from GitHub releases
+- **Platform Detection**: Automatically detects your OS and architecture to download the right binaries
+- **Archive Support**: Extracts tar.gz, tar.xz, and zip archives
+- **Python Support**: Installs Python tools from wheel files with virtual environments
+- **Auto-shimming**: Creates command-line shortcuts for installed tools
+- **Update Checking**: Automatically checks for tool updates
+- **Configuration**: Persistent configuration with environment variable overrides
 
-## 🛠️ Install
+## Installation
 
-Just use `tooler` to run itself:
-
-```bash
-tooler run morgaesis/tooler -h
-```
-
-For the first run:
+### From source
 
 ```bash
-curl -sLo- https://raw.githubusercontent.com/morgaesis/tooler/refs/heads/main/install.sh | bash
+git clone https://github.com/yourusername/tooler
+cd tooler
+cargo install --path .
 ```
 
-## 🚀 Usage
+### From crates.io (when published)
 
 ```bash
-tooler <command> [options]
+cargo install tooler
 ```
 
-### Commands
+## Usage
 
-- **`tooler run <tool_id> [args...]`**: Execute a tool. Auto-downloads if missing.
-
-  - `tool_id` can be `owner/repo` (latest) or `owner/repo:vX.Y.Z`.
-  - `args...` are passed directly to the tool.
-  - **Examples:**
-
-    ```bash
-    tooler run nektos/act --version
-    tooler run cli/cli:v2.40.0 feedback
-    ```
-
-- **`tooler list`**: See what's installed. 📋
-
-- **`tooler update <tool_id|--all>`**: Get latest versions.
-
-  - `tooler update cli/cli`
-  - `tooler update --all` (Only updates non-pinned tools)
-
-- **`tooler remove <tool_id>`**: Delete tools and their files. 🗑️
-
-  - `tooler remove nektos/act` (all versions)
-  - `tooler remove nektos/act:v0.2.79` (specific version)
-
-- **`tooler config <get|set> [key[=value]]`**: Manage `tooler` itself. ⚙️
-  - `tooler config get update_check_days`
-  - `tooler config set update_check_days=30`
-
-### Log Verbosity
-
-Logs go to `stderr`. Default: ⚠️`WARNING` & ❌`ERROR`.
-
-- `-v`: `INFO` & above.
-- `-vv`: `DEBUG` & above (talkative).
-- `-q`: Just ❌`ERROR`.
-
-### GitHub API Rate Limits
-
-Heavy usage? Set your `GITHUB_TOKEN` ENV var:
+### Basic Commands
 
 ```bash
-export GITHUB_TOKEN="ghp_YOUR_TOKEN_HERE" # PAT with 'public_repo' scope
+# Run a tool (downloads and installs if needed)
+tooler run nektos/act
+
+# Run a specific version
+tooler run nektos/act@v0.2.79 -- --help
+
+# List installed tools
+tooler list
+
+# Update a tool
+tooler update nektos/act
+
+# Update all tools
+tooler update --all
+
+# Remove a tool
+tooler remove nektos/act
 ```
+
+### Configuration
+
+```bash
+# Show all settings
+tooler config get
+
+# Get a specific setting
+tooler config get update_check_days
+
+# Set a setting
+tooler config set auto_shim=true
+tooler config set shim_dir=/home/user/.local/bin
+
+# Unset a setting (revert to default)
+tooler config unset shim_dir
+```
+
+### Advanced Usage
+
+```bash
+# Run with explicit asset selection
+tooler run argoproj/argo-cd --asset argocd-darwin-amd64
+
+# Verbose output
+tooler -v run act
+
+# Quiet mode (errors only)
+tooler -q list
+
+# Run a previously installed tool by short name
+tooler run act -- --help
+```
+
+## Configuration
+
+Settings are stored in `~/.config/.tooler/config.json` and can be overridden with environment variables:
+
+- `update_check_days`: Days between update checks (default: 60, env: `TOOLER_UPDATE_CHECK_DAYS`)
+- `auto_shim`: Create command-line shims (default: false, env: `TOOLER_AUTO_SHIM`)
+- `shim_dir`: Directory for shims (default: `~/.local/bin`, env: `TOOLER_SHIM_DIR`)
+
+## Architecture Support
+
+Tooler supports automatic detection and downloading for:
+
+### Operating Systems
+- Linux (gnu, musl)
+- macOS (darwin)
+- Windows (msvc, gnu)
+
+### Architectures
+- amd64 (x86_64)
+- arm64 (aarch64)
+- arm (armv7, armv7l)
+
+## Asset Selection
+
+Tooler prioritizes assets in this order:
+
+1. **Archive with OS + Arch** (tar.gz, zip, tar.xz, tgz)
+2. **Binary with OS + Arch** (direct executables)
+3. **Package with OS + Arch** (apk, deb, rpm)
+4. **Archive with OS only**
+5. **Binary with OS only**
+6. **Package with OS only**
+7. **Archive with Arch only**
+8. **Binary with Arch only**
+9. **Package with Arch only**
+10. **Python wheel** (fallback)
+
+## Development
+
+### Building
+
+```bash
+cargo build --release
+```
+
+### Testing
+
+```bash
+cargo test
+```
+
+### Running from source
+
+```bash
+cargo run -- run nektos/act -- --help
+```
+
+## Migration from Python
+
+This Rust version maintains compatibility with the Python tooler configuration and data formats. Simply replace the Python installation with the Rust binary, and your existing tools and settings will continue to work.
+
+## License
+
+MIT
