@@ -4,8 +4,7 @@ use clap::{Parser, Subcommand};
 #[command(name = "tooler")]
 #[command(about = "A CLI tool manager for GitHub Releases")]
 #[command(version)]
-#[command(
-    after_help = "Examples:
+#[command(after_help = "Examples:
   tooler run nektos/act@v0.2.79 -- --help                   # Run specific version with args
   tooler run adrienverge/yamllint                           # Run Python tool from .whl asset
   tooler run argoproj/argo-cd --asset argocd-darwin-amd64   # Run with an explicit asset
@@ -21,15 +20,14 @@ use clap::{Parser, Subcommand};
   tooler config get                                         # Show all settings
   tooler config set auto_shim=true                          # Enable auto-shimming
   tooler config set shim_dir=/home/user/.local/bin          # Set shim directory
-  tooler config unset shim_dir                              # Unset shim_dir (reverts to default)"
-)]
+  tooler config unset shim_dir                              # Unset shim_dir (reverts to default)")]
 pub struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
-    
+
     #[arg(short, long)]
     pub quiet: bool,
-    
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -47,33 +45,31 @@ pub enum Commands {
         #[arg(long)]
         asset: Option<String>,
     },
-    
+
     /// List all installed tools
     List,
-    
+
     /// Update one or all tools
     Update {
         /// Tool to update (e.g., 'owner/repo' or 'tool-name'), or 'all' to update all
         tool_id: Option<String>,
     },
-    
+
     /// Remove an installed tool
     Remove {
         /// Tool to remove (e.g., 'owner/repo')
         tool_id: String,
     },
-    
+
     /// Manage tooler's configuration
     Config {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    
+
     /// Show the current version
     Version,
 }
-
-
 
 #[derive(Subcommand)]
 pub enum ConfigAction {

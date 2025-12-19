@@ -19,13 +19,17 @@ impl ToolIdentifier {
         // Handle @ for version, : for backwards compatibility
         let (repo_part, version_part) = if tool_id.contains('@') {
             let mut parts = tool_id.splitn(2, '@');
-            let repo = parts.next().ok_or_else(|| "Missing repository part".to_string())?;
+            let repo = parts
+                .next()
+                .ok_or_else(|| "Missing repository part".to_string())?;
             let version = parts.next().map(|s| s.to_string());
             (repo, version)
         } else if tool_id.contains(':') {
             // Backwards compatibility with old : syntax
             let mut parts = tool_id.splitn(2, ':');
-            let repo = parts.next().ok_or_else(|| "Missing repository part".to_string())?;
+            let repo = parts
+                .next()
+                .ok_or_else(|| "Missing repository part".to_string())?;
             let version = parts.next().map(|s| s.to_string());
             (repo, version)
         } else {
@@ -77,7 +81,7 @@ impl ToolIdentifier {
                 } else {
                     format!("v{}", v)
                 }
-            },
+            }
             None => "latest".to_string(),
         }
     }
