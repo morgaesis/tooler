@@ -22,6 +22,8 @@ pub fn find_asset_for_platform(
     system_os: &str,
     system_arch: &str,
 ) -> Result<Option<AssetInfo>> {
+    tracing::trace!("Looking for assets matching OS: '{}', ARCH: '{}'", system_os, system_arch);
+    
     let _default_os = vec![system_os.to_string()];
     let _default_arch = vec![system_arch.to_string()];
     
@@ -34,8 +36,11 @@ pub fn find_asset_for_platform(
     let arch_aliases = [
         ("x86_64", vec!["amd64", "x64", "x86_64"]),
         ("aarch64", vec!["arm64", "aarch64"]),
+        ("arm64", vec!["arm64", "aarch64"]),  // Add arm64 as key since get_system_info normalizes aarch64 to arm64
         ("arm", vec!["arm", "armv7"]),
     ];
+    
+    tracing::trace!("Available arch aliases: {:?}", arch_aliases);
     
     let archive_exts = vec![".tar.gz", ".zip", ".tar.xz", ".tgz"];
     let package_exts = vec![".apk", ".deb", ".rpm"];
@@ -48,6 +53,16 @@ pub fn find_asset_for_platform(
         assets, &os_aliases, &arch_aliases, &archive_exts, &package_exts, &invalid_exts
     );
     
+    // Debug: print all candidates
+    for (category, asset_list) in &candidates {
+        if !asset_list.is_empty() {
+            tracing::trace!("Category '{}': {} assets", category, asset_list.len());
+            for asset in asset_list {
+                tracing::trace!("  - {}", asset.name);
+            }
+        }
+    }
+    
     let priority_order = vec![
         "os_arch_archive", "os_arch_binary", "os_arch_package",
         "os_only_archive", "os_only_binary", "os_only_package",
@@ -56,8 +71,43 @@ pub fn find_asset_for_platform(
     
     for category in priority_order {
         if let Some(asset_list) = candidates.remove(category) {
-            if let Some(asset) = asset_list.first() {
+            // Filter assets by exact OS and architecture match
+            let matching_assets: Vec<&GitHubAsset> = asset_list.iter()
+                .filter(|asset| {
+                    let name_lower = asset.name.to_lowercase();
+                    let os_match = os_aliases.iter()
+                        .any(|(os, aliases)| os == &system_os && aliases.iter().any(|alias| name_lower.contains(alias)));
+                    let arch_match = arch_aliases.iter()
+                        .any(|(arch, aliases)| arch == &system_arch && aliases.iter().any(|alias| name_lower.contains(alias)));
+                    
+                    tracing::trace!("Asset '{}': os_match={}, arch_match={}", asset.name, os_match, arch_match);
+                    
+                    // For os_arch_* categories, both must match
+                    if category.starts_with("os_arch_") {
+                        os_match && arch_match
+                    } else if category.starts_with("os_only_") {
+                        os_match
+                    } else if category.starts_with("arch_only_") {
+                        arch_match
+                    } else {
+                        false
+                    }
+                })
+                .collect();
+            
+            tracing::trace!("Category '{}': {} matching assets out of {}", category, matching_assets.len(), asset_list.len());
+            
+            if let Some(asset) = matching_assets.first() {
                 tracing::info!("Found best match: '{}'", asset.name);
+                return Ok(Some(AssetInfo {
+                    name: asset.name.clone(),
+                    download_url: asset.browser_download_url.clone(),
+                }));
+            }
+            
+            // If no exact match, fall back to first asset in category
+            if let Some(asset) = asset_list.first() {
+                tracing::info!("Found best match (fallback): '{}'", asset.name);
                 return Ok(Some(AssetInfo {
                     name: asset.name.clone(),
                     download_url: asset.browser_download_url.clone(),

@@ -15,7 +15,7 @@ use clap::{Parser, Subcommand};
   tooler list                                               # List all installed tools
   tooler update nektos/act                                  # Update to latest version
   tooler update yamllint                                    # Update short-name to latest version
-  tooler update --all                                       # Update all non-pinned tools
+  tooler update all                                         # Update all non-pinned tools
   tooler remove nektos/act                                  # Remove all versions of a tool
 
   tooler config get                                         # Show all settings
@@ -53,8 +53,8 @@ pub enum Commands {
     
     /// Update one or all tools
     Update {
-        #[command(subcommand)]
-        action: UpdateAction,
+        /// Tool to update (e.g., 'owner/repo' or 'tool-name'), or 'all' to update all
+        tool_id: Option<String>,
     },
     
     /// Remove an installed tool
@@ -73,16 +73,7 @@ pub enum Commands {
     Version,
 }
 
-#[derive(Subcommand)]
-pub enum UpdateAction {
-    /// Update a specific tool
-    Tool {
-        /// Specific tool to update
-        tool_id: String,
-    },
-    /// Update all applicable tools
-    All,
-}
+
 
 #[derive(Subcommand)]
 pub enum ConfigAction {

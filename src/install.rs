@@ -56,6 +56,11 @@ pub async fn install_or_update_tool(
     force_update: bool,
     asset_override: Option<&str>,
 ) -> Result<PathBuf> {
+    // Prevent installing a tool that would conflict with tooler-shim
+    if tool_name.to_lowercase() == "tooler-shim" {
+        return Err(anyhow!("Cannot install tool named 'tooler-shim' as it conflicts with the tooler shim system"));
+    }
+    
     let system_info = get_system_info();
     let version = version.unwrap_or("latest");
     
@@ -67,7 +72,7 @@ pub async fn install_or_update_tool(
     let tool_key = tool_identifier.config_key();
     
     let tool_install_base_dir = get_tooler_tools_dir()?
-        .join(repo_full_name.replace('/', "__"));
+        .join(format!("{}__{}", repo_full_name.replace('/', "__"), system_info.arch));
     let tool_version_dir = tool_install_base_dir.join(actual_version);
     
     tracing::debug!("Tool installation base directory: {}", tool_install_base_dir.display());
@@ -394,6 +399,11 @@ fn find_highest_version<'a>(tools: Vec<&'a ToolInfo>) -> Option<&'a ToolInfo> {
 }
 
 pub fn remove_tool(config: &mut ToolerConfig, tool_query: &str) -> Result<()> {
+    // Prevent removing tooler-shim
+    if tool_query.to_lowercase() == "tooler-shim" {
+        return Err(anyhow!("Cannot remove 'tooler-shim' as it is part of the tooler system"));
+    }
+    
     let tool_identifier = ToolIdentifier::parse(tool_query)
         .map_err(|e| anyhow!("Invalid tool identifier: {}", e))?;
     let keys_to_remove: Vec<String> = config.tools
@@ -414,15 +424,31 @@ pub fn remove_tool(config: &mut ToolerConfig, tool_query: &str) -> Result<()> {
     
     for key in keys_to_remove {
         if let Some(info) = config.tools.remove(&key) {
-            let tool_install_base_dir = get_tooler_tools_dir()?
+            // Remove all architecture directories for this tool
+            let tool_base_dir = get_tooler_tools_dir()?
                 .join(info.repo.replace('/', "__"));
-            let tool_version_dir = tool_install_base_dir.join(&info.version);
             
-            if tool_version_dir.exists() {
-                tracing::info!("Removing directory: {}", tool_version_dir.display());
-                fs::remove_dir_all(&tool_version_dir)?;
-            } else {
-                tracing::warn!("Tool directory not found, assuming already removed: {}", tool_version_dir.display());
+            // Try to remove the specific version directory first
+            if tool_base_dir.join(&info.version).exists() {
+                tracing::info!("Removing directory: {}", tool_base_dir.join(&info.version).display());
+                fs::remove_dir_all(tool_base_dir.join(&info.version))?;
+            }
+            
+            // Also check for architecture-specific directories
+            if let Ok(entries) = fs::read_dir(&tool_base_dir.parent().unwrap_or(&tool_base_dir)) {
+                for entry in entries.flatten() {
+                    let entry_path = entry.path();
+                    if entry_path.is_dir() {
+                        let dir_name = entry_path.file_name().unwrap_or_default().to_string_lossy();
+                        if dir_name.starts_with(&format!("{}__", info.repo.replace('/', "__"))) {
+                            let version_dir = entry_path.join(&info.version);
+                            if version_dir.exists() {
+                                tracing::info!("Removing architecture-specific directory: {}", version_dir.display());
+                                fs::remove_dir_all(&version_dir)?;
+                            }
+                        }
+                    }
+                }
             }
         }
     }

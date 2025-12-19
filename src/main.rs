@@ -9,7 +9,7 @@ mod types;
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use clap::Parser;
-use cli::{Cli, Commands, ConfigAction, UpdateAction};
+use cli::{Cli, Commands, ConfigAction};
 use config::{load_tool_configs, normalize_key, save_tool_configs};
 use install::{find_tool_executable, install_or_update_tool, remove_tool};
 use tool_id::ToolIdentifier;
@@ -45,21 +45,9 @@ async fn main() -> Result<()> {
             remove_tool(&mut config, &tool_identifier.config_key())?;
         }
         
-        Commands::Update { action } => {
-            match action {
-                UpdateAction::Tool { tool_id } => {
-            let tool_identifier = ToolIdentifier::parse(&tool_id)
-                .map_err(|e| anyhow!("Invalid tool identifier: {}", e))?;
-                    tracing::info!("Attempting to update {}...", tool_id);
-                    match install_or_update_tool(&mut config, &tool_identifier.tool_name(), &tool_identifier.full_repo(), Some("latest"), true, None).await {
-                        Ok(_) => tracing::info!("{} updated successfully", tool_id),
-                        Err(e) => {
-                            tracing::error!("Failed to update {}: {}", tool_id, e);
-                            std::process::exit(1);
-                        }
-                    }
-                }
-                UpdateAction::All => {
+        Commands::Update { tool_id } => {
+            if let Some(tool_id) = tool_id {
+                if tool_id == "all" {
                     tracing::info!("Updating all applicable tools...");
                     let mut updated_count = 0;
                     let keys_to_update: Vec<String> = config.tools
@@ -77,7 +65,21 @@ async fn main() -> Result<()> {
                         }
                     }
                     tracing::info!("Update process finished. {} tool(s) were checked/updated", updated_count);
+                } else {
+                    let tool_identifier = ToolIdentifier::parse(&tool_id)
+                        .map_err(|e| anyhow!("Invalid tool identifier: {}", e))?;
+                    tracing::info!("Attempting to update {}...", tool_id);
+                    match install_or_update_tool(&mut config, &tool_identifier.tool_name(), &tool_identifier.full_repo(), Some("latest"), true, None).await {
+                        Ok(_) => tracing::info!("{} updated successfully", tool_id),
+                        Err(e) => {
+                            tracing::error!("Failed to update {}: {}", tool_id, e);
+                            std::process::exit(1);
+                        }
+                    }
                 }
+            } else {
+                tracing::error!("Please specify a tool to update or use 'all' to update all tools");
+                std::process::exit(1);
             }
         }
         
@@ -290,12 +292,16 @@ async fn check_for_updates(config: &mut types::ToolerConfig) -> Result<()> {
     for key in keys_to_check {
         if let Some(info) = config.tools.get(&key).cloned() {
             let last_accessed: DateTime<Utc> = info.last_accessed.parse()?;
-            if (now - last_accessed).num_days() > config.settings.update_check_days as i64 {
-                tracing::debug!("Checking for update for {} (current: {})", info.repo, info.version);
+            let days_since_update = (now - last_accessed).num_days();
+            
+            if days_since_update > config.settings.update_check_days as i64 {
+                tracing::info!("Checking for update for {} (current: {}, last updated: {} days ago)", 
+                    info.repo, info.version, days_since_update);
                 
                 if let Ok(release) = install::get_gh_release_info(&info.repo, Some("latest")).await {
                     if release.tag_name != info.version {
-                        updates_found.push(format!("Tool {} ({}) has update: {} -> {}", info.tool_name, info.repo, info.version, release.tag_name));
+                        updates_found.push(format!("Tool {} ({}) has update: {} -> {} (last updated {} days ago)", 
+                            info.tool_name, info.repo, info.version, release.tag_name, days_since_update));
                     }
                     
                     // Update last_accessed
@@ -315,7 +321,7 @@ async fn check_for_updates(config: &mut types::ToolerConfig) -> Result<()> {
         for msg in updates_found {
             eprintln!("  {}", msg);
         }
-        eprintln!("To update, run `tooler update [repo/tool]` or `tooler update --all`.");
+        eprintln!("To update, run `tooler update [repo/tool]` or `tooler update all`.");
         eprintln!("----------------------------\n");
     } else {
         tracing::info!("No updates found or checks are not due.");
@@ -340,6 +346,28 @@ fn create_shim_script(shim_dir: &str) -> Result<()> {
         }
         
         tracing::info!("Created shim script at {}", shim_path.display());
+    } else {
+        // Verify existing shim is a script, not a binary
+        if let Ok(metadata) = fs::metadata(&shim_path) {
+            if metadata.is_file() {
+                // Check if it's a script by reading first few bytes
+                if let Ok(content) = fs::read_to_string(&shim_path) {
+                    if !content.starts_with("#!/bin/bash") {
+                        tracing::warn!("tooler-shim exists but is not a script. Recreating...");
+                        let shim_content = "#!/bin/bash\ntool_name=$(basename \"$0\")\nexec tooler run \"$tool_name\" \"$@\"\n";
+                        fs::write(&shim_path, shim_content)?;
+                        
+                        #[cfg(unix)]
+                        {
+                            use std::os::unix::fs::PermissionsExt;
+                            let mut perms = fs::metadata(&shim_path)?.permissions();
+                            perms.set_mode(0o755);
+                            fs::set_permissions(&shim_path, perms)?;
+                        }
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -347,6 +375,11 @@ fn create_shim_script(shim_dir: &str) -> Result<()> {
 fn create_tool_symlink(shim_dir: &str, tool_name: &str) -> Result<()> {
     let shim_path = Path::new(shim_dir).join("tooler-shim");
     let symlink_path = Path::new(shim_dir).join(tool_name);
+    
+    // Don't create symlink for tooler-shim itself
+    if tool_name == "tooler-shim" {
+        return Ok(());
+    }
     
     if !symlink_path.exists() {
         #[cfg(unix)]
