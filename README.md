@@ -14,10 +14,16 @@ A CLI tool manager for GitHub Releases written in Rust.
 
 ## Installation
 
-### From source
+### Quick Install (curl-pipe)
 
 ```bash
-git clone https://github.com/yourusername/tooler
+curl -sSL https://github.com/morgaesis/tooler/releases/latest/download/install.sh | bash
+```
+
+### From Source
+
+```bash
+git clone https://github.com/morgaesis/tooler
 cd tooler
 cargo install --path .
 ```
@@ -98,11 +104,13 @@ Settings are stored in `~/.config/.tooler/config.json` and can be overridden wit
 Tooler supports automatic detection and downloading for:
 
 ### Operating Systems
+
 - Linux (gnu, musl)
 - macOS (darwin)
 - Windows (msvc, gnu)
 
 ### Architectures
+
 - amd64 (x86_64)
 - arm64 (aarch64)
 - arm (armv7, armv7l)

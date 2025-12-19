@@ -1,4 +1,4 @@
-name: Push
+name: Release
 on:
   push:
     tags:
@@ -6,25 +6,86 @@ on:
 
 jobs:
   build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_name: tooler
+            asset_name: tooler-${{ github.ref_name }}-x86_64-unknown-linux-gnu.tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact_name: tooler
+            asset_name: tooler-${{ github.ref_name }}-aarch64-unknown-linux-gnu.tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            artifact_name: tooler
+            asset_name: tooler-${{ github.ref_name }}-x86_64-apple-darwin.tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact_name: tooler
+            asset_name: tooler-${{ github.ref_name }}-aarch64-apple-darwin.tar.gz
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact_name: tooler.exe
+            asset_name: tooler-${{ github.ref_name }}-x86_64-pc-windows-msvc.zip
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Strip binary (Unix)
+        if: runner.os != 'Windows'
+        run: strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+
+      - name: Create archive (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} dist/
+          cd dist
+          tar -czf ${{ matrix.asset_name }} ${{ matrix.artifact_name }}
+
+      - name: Create archive (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/${{ matrix.artifact_name }} dist/
+          cd dist
+          7z a ${{ matrix.asset_name }} ${{ matrix.artifact_name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: dist/${{ matrix.asset_name }}
+
+  release:
+    name: Create Release
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
-          cache: "pip"
-      - run: |
-          rm -rf .venv/
-          python3 -m venv .venv/
-          . ./.venv/bin/activate
-          pip install pex
-          mkdir -p dist/
-          pex . -r requirements.txt -e tooler:main -o dist/tooler
-          deactivate
-          cd dist && tar -czf tooler.tar.gz tooler
-      - name: Release
+          path: artifacts
+
+      - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/tooler.tar.gz
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
