@@ -5,13 +5,14 @@ mod install;
 mod platform;
 mod tool_id;
 mod types;
+mod tests;
 
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use clap::Parser;
 use cli::{Cli, Commands, ConfigAction};
 use config::{load_tool_configs, normalize_key, save_tool_configs};
-use install::{find_tool_executable, install_or_update_tool, remove_tool};
+use install::{find_tool_executable, install_or_update_tool, pin_tool, remove_tool};
 use std::env;
 use std::fs;
 use std::path::Path;
@@ -31,20 +32,17 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Version => {
-            println!("tooler v{}", env!("CARGO_PKG_VERSION"));
+            println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
             return Ok(());
         }
-
         Commands::List => {
             list_installed_tools(&config);
         }
-
         Commands::Remove { tool_id } => {
             let tool_identifier = ToolIdentifier::parse(&tool_id)
                 .map_err(|e| anyhow!("Invalid tool identifier: {}", e))?;
             remove_tool(&mut config, &tool_identifier.config_key())?;
         }
-
         Commands::Update { tool_id } => {
             if let Some(tool_id) = tool_id {
                 if tool_id == "all" {
@@ -56,7 +54,6 @@ async fn main() -> Result<()> {
                         .filter(|k| !k.contains(':')) // Only non-version-pinned tools
                         .cloned()
                         .collect();
-
                     for key in keys_to_update {
                         if let Some(info) = config.tools.get(&key).cloned() {
                             match install_or_update_tool(
@@ -88,7 +85,7 @@ async fn main() -> Result<()> {
                             .map_err(|e| anyhow!("Invalid tool identifier: {}", e))?;
                         (tool_identifier.tool_name(), tool_identifier.full_repo())
                     };
-                    
+
                     tracing::info!("Attempting to update {}...", repo);
                     match install_or_update_tool(
                         &mut config,
@@ -112,7 +109,34 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
+        Commands::Pull { tool_id } => {
+            // First find the existing tool to get the correct repo
+            let existing_tool = find_tool_executable(&config, &tool_id);
+            let (tool_name, repo) = if let Some(tool_info) = existing_tool {
+                (tool_info.tool_name.clone(), tool_info.repo.clone())
+            } else {
+                let tool_identifier = ToolIdentifier::parse(&tool_id)
+                    .map_err(|e| anyhow!("Invalid tool identifier: {}", e))?;
+                (tool_identifier.tool_name(), tool_identifier.full_repo())
+            };
 
+            tracing::info!("Pulling latest version of {}...", repo);
+            match install_or_update_tool(&mut config, &tool_name, &repo, Some("latest"), true, None)
+                .await
+            {
+                Ok(path) => {
+                    tracing::info!(
+                        "Successfully pulled latest version of {} to {}",
+                        repo,
+                        path.display()
+                    );
+                }
+                Err(e) => {
+                    tracing::error!("Failed to pull {}: {}", tool_id, e);
+                    std::process::exit(1);
+                }
+            }
+        }
         Commands::Config { action } => match action {
             ConfigAction::Get { key } => {
                 if let Some(key) = key {
@@ -194,7 +218,6 @@ async fn main() -> Result<()> {
                 }
             }
         },
-
         Commands::Run {
             tool_id,
             tool_args,
@@ -203,14 +226,11 @@ async fn main() -> Result<()> {
             let tool_identifier = ToolIdentifier::parse(&tool_id)
                 .map_err(|e| anyhow!("Invalid tool identifier: {}", e))?;
             let version_req = tool_identifier.api_version();
-
             // Check for updates if not a pinned version
             if !tool_identifier.is_pinned() {
                 check_for_updates(&mut config).await?;
             }
-
             let mut tool_info = find_tool_executable(&config, &tool_id);
-
             // Install if not found or if asset override is used
             if tool_info.is_none() || asset.is_some() {
                 if tool_info.is_none() {
@@ -219,7 +239,6 @@ async fn main() -> Result<()> {
                         tool_id
                     );
                 }
-
                 match install_or_update_tool(
                     &mut config,
                     &tool_identifier.tool_name(),
@@ -240,7 +259,6 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-
             if let Some(info) = tool_info {
                 // Show tool age with update reason
                 match info.last_accessed.parse::<DateTime<Utc>>() {
@@ -251,32 +269,44 @@ async fn main() -> Result<()> {
                         let hours = duration.num_hours() % 24;
                         let minutes = duration.num_minutes() % 60;
                         let seconds = duration.num_seconds() % 60;
-                        let is_pinned_version = info.version != "latest" && !info.version.to_lowercase().contains("latest");
-                        
+                        let is_pinned_version = info.version != "latest"
+                            && !info.version.to_lowercase().contains("latest");
+
                         if is_pinned_version {
-                            tracing::info!("{} is {} days old ({}h {}m {}s)", info.repo, days_since_update, hours, minutes, seconds);
+                            tracing::info!(
+                                "{} is {} days old ({}h {}m {}s)",
+                                info.repo,
+                                days_since_update,
+                                hours,
+                                minutes,
+                                seconds
+                            );
                             if days_since_update > config.settings.update_check_days as i64 {
                                 tracing::info!("Tool is version-pinned and not auto-updated");
                             }
                         } else {
-                            tracing::info!("{} is {} days old ({}h {}m {}s)", info.repo, days_since_update, hours, minutes, seconds);
+                            tracing::info!(
+                                "{} is {} days old ({}h {}m {}s)",
+                                info.repo,
+                                days_since_update,
+                                hours,
+                                minutes,
+                                seconds
+                            );
                         }
                     }
                     Err(_) => {
                         tracing::info!("{} age: unknown", info.repo);
                     }
                 }
-
                 // Create shim if auto_shim is enabled
                 if config.settings.auto_shim && !cfg!(windows) {
                     create_shim_script(&config.settings.shim_dir)?;
                     create_tool_symlink(&config.settings.shim_dir, &tool_identifier.tool_name())?;
                 }
-
                 // Update last accessed time
                 let key = tool_identifier.config_key();
                 let executable_path = info.executable_path.clone();
-
                 // Update config in separate scope
                 {
                     if let Some(tool_info) = config.tools.get_mut(&key) {
@@ -284,13 +314,10 @@ async fn main() -> Result<()> {
                         save_tool_configs(&config)?;
                     }
                 }
-
                 // Execute tool
                 let mut cmd = Command::new(&executable_path);
                 cmd.args(&tool_args);
-
                 tracing::debug!("Executing: {:?} {:?}", executable_path, tool_args);
-
                 let mut child = cmd.spawn()?;
                 let status = child.wait()?;
                 std::process::exit(status.code().unwrap_or(1));
@@ -298,6 +325,9 @@ async fn main() -> Result<()> {
                 tracing::error!("Failed to find or install executable for {}", tool_id);
                 std::process::exit(1);
             }
+        }
+        Commands::Pin { tool_id } => {
+            pin_tool(&mut config, &tool_id)?;
         }
     }
 
@@ -373,7 +403,9 @@ async fn check_for_updates(config: &mut types::ToolerConfig) -> Result<()> {
         .collect();
 
     if unpinned_tools.is_empty() {
-        tracing::info!("No unpinned tools found to check for updates. (All tools are version-pinned)");
+        tracing::info!(
+            "No unpinned tools found to check for updates. (All tools are version-pinned)"
+        );
         return Ok(());
     }
 
@@ -390,12 +422,13 @@ async fn check_for_updates(config: &mut types::ToolerConfig) -> Result<()> {
                         days_since_update
                     );
 
-                    if let Ok(release) = install::get_gh_release_info(&info.repo, Some("latest")).await
+                    if let Ok(release) =
+                        install::get_gh_release_info(&info.repo, Some("latest")).await
                     {
                         // Strip 'v' prefix for comparison
                         let current_clean = info.version.trim_start_matches('v');
                         let latest_clean = release.tag_name.trim_start_matches('v');
-                        
+
                         if latest_clean != current_clean {
                             updates_found.push(format!(
                                 "Tool {} ({}) has update: {} -> {} (last updated {} days ago)",
@@ -418,7 +451,11 @@ async fn check_for_updates(config: &mut types::ToolerConfig) -> Result<()> {
                 }
             }
             Err(e) => {
-                tracing::warn!("Failed to parse timestamp for {}, skipping update check: {}", info.repo, e);
+                tracing::warn!(
+                    "Failed to parse timestamp for {}, skipping update check: {}",
+                    info.repo,
+                    e
+                );
             }
         }
     }

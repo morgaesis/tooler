@@ -1,6 +1,6 @@
 use crate::types::*;
 use anyhow::{Context, Result};
-use dirs;
+
 use std::fs;
 use std::path::PathBuf;
 
@@ -49,8 +49,31 @@ pub fn load_tool_configs() -> Result<ToolerConfig> {
     let content = fs::read_to_string(&config_path)
         .with_context(|| format!("Could not read config file at {}", config_path.display()))?;
 
-    let mut config: ToolerConfig =
-        serde_json::from_str(&content).with_context(|| "Could not parse config file as JSON")?;
+    let mut config: ToolerConfig = match serde_json::from_str(&content) {
+        Ok(config) => config,
+        Err(e) => {
+            // Check if error is due to missing fields (partial config) vs malformed JSON
+            if e.is_data() {
+                // Missing fields - try to parse as partial config and merge with defaults
+                let mut default_config = ToolerConfig::default();
+                if let Ok(partial_config) = serde_json::from_str::<ToolerConfig>(&content) {
+                    // Merge any valid settings from partial config
+                    if partial_config.settings.update_check_days != 0 {
+                        default_config.settings.update_check_days =
+                            partial_config.settings.update_check_days;
+                    }
+                    if !partial_config.settings.shim_dir.is_empty() {
+                        default_config.settings.shim_dir = partial_config.settings.shim_dir;
+                    }
+                    default_config.settings.auto_shim = partial_config.settings.auto_shim;
+                }
+                default_config
+            } else {
+                // Malformed JSON - fail with original error
+                return Err(e).with_context(|| "Could not parse config file as JSON");
+            }
+        }
+    };
 
     // Apply environment variable overrides
     if let Ok(days) = std::env::var("TOOLER_UPDATE_CHECK_DAYS") {

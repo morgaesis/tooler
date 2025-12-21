@@ -34,8 +34,8 @@ pub fn find_asset_for_platform(
     let is_musl = is_musl_system();
     tracing::debug!("System is_musl: {}", is_musl);
 
-    let _default_os = vec![system_os.to_string()];
-    let _default_arch = vec![system_arch.to_string()];
+    let _default_os = [system_os.to_string()];
+    let _default_arch = [system_arch.to_string()];
 
     let os_aliases = [
         ("linux", vec!["linux", "unknown-linux", "pc-linux"]),

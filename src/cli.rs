@@ -15,6 +15,7 @@ use clap::{Parser, Subcommand};
   tooler update nektos/act                                  # Update to latest version
   tooler update yamllint                                    # Update short-name to latest version
   tooler update all                                         # Update all non-pinned tools
+  tooler pull nektos/act                                    # Pull latest version without updating
   tooler remove nektos/act                                  # Remove all versions of a tool
 
   tooler config get                                         # Show all settings
@@ -55,9 +56,21 @@ pub enum Commands {
         tool_id: Option<String>,
     },
 
+    /// Pull latest version of a tool without updating existing installation
+    Pull {
+        /// Tool to pull (e.g., 'owner/repo' or 'tool-name')
+        tool_id: String,
+    },
+
     /// Remove an installed tool
     Remove {
         /// Tool to remove (e.g., 'owner/repo')
+        tool_id: String,
+    },
+
+    /// Pin a tool to a specific version
+    Pin {
+        /// Tool to pin (e.g., 'owner/repo@version')
         tool_id: String,
     },
 

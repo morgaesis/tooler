@@ -9,8 +9,14 @@ pub struct ToolInfo {
     pub version: String,
     pub executable_path: String,
     pub install_type: String,
+    #[serde(default = "default_pinned")]
+    pub pinned: bool,
     pub installed_at: String,
     pub last_accessed: String,
+}
+
+fn default_pinned() -> bool {
+    false
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -35,19 +41,10 @@ impl Default for ToolerSettings {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ToolerConfig {
     pub tools: HashMap<String, ToolInfo>,
     pub settings: ToolerSettings,
-}
-
-impl Default for ToolerConfig {
-    fn default() -> Self {
-        Self {
-            tools: HashMap::new(),
-            settings: ToolerSettings::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

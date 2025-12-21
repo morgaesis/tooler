@@ -88,6 +88,13 @@ impl ToolIdentifier {
         }
     }
 
+
+
+    /// Get: configuration key for a default (latest) tool
+    pub fn default_config_key(&self) -> String {
+        format!("{}@latest", self.full_repo())
+    }
+
     /// Check if this is a version-pinned tool
     pub fn is_pinned(&self) -> bool {
         self.version.is_some() && self.version.as_deref().unwrap_or("default") != "default"

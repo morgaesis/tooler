@@ -24,7 +24,7 @@ pub async fn get_gh_release_info(
         // Smart version handling: don't add 'v' prefix for non-numeric versions like "tip", "master"
         // but preserve existing 'v' prefixes and add 'v' for numeric versions
         let version = if version.starts_with('v')
-            || version.chars().next().map_or(false, |c| c.is_ascii_digit())
+            || version.chars().next().is_some_and(|c| c.is_ascii_digit())
         {
             version
         } else {
@@ -83,9 +83,9 @@ pub async fn install_or_update_tool(
     }
 
     let system_info = get_system_info();
-    let version = version.unwrap_or("latest");
+    let requested_version = version.unwrap_or("latest");
 
-    let release_info = get_gh_release_info(repo_full_name, Some(version)).await?;
+    let release_info = get_gh_release_info(repo_full_name, Some(requested_version)).await?;
     let actual_version = &release_info.tag_name;
 
     let tool_identifier = ToolIdentifier::parse(&format!("{}@{}", repo_full_name, actual_version))
@@ -114,7 +114,7 @@ pub async fn install_or_update_tool(
                 "Checking if executable exists at: {}",
                 current_info.executable_path
             );
-            
+
             // If asset_override is provided, check if the specific asset exists
             if let Some(asset_name) = asset_override {
                 let expected_asset_path = tool_version_dir.join(asset_name);
@@ -264,6 +264,9 @@ pub async fn install_or_update_tool(
         version: actual_version.trim_start_matches('v').to_string(),
         executable_path: executable_path.to_string_lossy().to_string(),
         install_type,
+        pinned: version.is_some()
+            && requested_version != "latest"
+            && requested_version != "default",
         installed_at: Utc::now().to_rfc3339(),
         last_accessed: Utc::now().to_rfc3339(),
     };
@@ -396,9 +399,10 @@ pub fn find_tool_executable<'a>(
 
         // If exact match not found, try matching by repo name with any version
         // This handles cases like @latest when you have a specific version installed
-        let matching_tool = config.tools.values().find(|info| {
-            info.repo.to_lowercase() == tool_identifier.full_repo().to_lowercase()
-        });
+        let matching_tool = config
+            .tools
+            .values()
+            .find(|info| info.repo.to_lowercase() == tool_identifier.full_repo().to_lowercase());
 
         if let Some(exact_match) = matching_tool {
             tracing::debug!("Found tool by repo match: {}", exact_match.repo);
@@ -407,8 +411,10 @@ pub fn find_tool_executable<'a>(
 
         // Also try matching by tool name only (last part of repo)
         let matching_by_name = config.tools.values().find(|info| {
-            info.repo.to_lowercase().ends_with(&format!("/{}", tool_identifier.tool_name().to_lowercase())) ||
-            info.repo.to_lowercase() == tool_identifier.tool_name().to_lowercase()
+            info.repo
+                .to_lowercase()
+                .ends_with(&format!("/{}", tool_identifier.tool_name().to_lowercase()))
+                || info.repo.to_lowercase() == tool_identifier.tool_name().to_lowercase()
         });
 
         if let Some(exact_match) = matching_by_name {
@@ -417,7 +423,11 @@ pub fn find_tool_executable<'a>(
         }
 
         // For backwards compatibility, also check the old : format
-        let old_key = format!("{}:{}", tool_identifier.full_repo(), tool_identifier.api_version());
+        let old_key = format!(
+            "{}:{}",
+            tool_identifier.full_repo(),
+            tool_identifier.api_version()
+        );
         if let Some(exact_match) = config.tools.get(&old_key) {
             return Some(exact_match);
         }
@@ -444,8 +454,7 @@ pub fn find_tool_executable<'a>(
                     }
 
                     // Use version field from ToolInfo
-                    let version_match = version_matches(requested_version, &info.version);
-                    version_match
+                    version_matches(requested_version, &info.version)
                 })
                 .collect();
 
@@ -532,7 +541,7 @@ fn version_matches(requested: &str, existing: &str) -> bool {
 }
 
 /// Find highest version among matching tools
-fn find_highest_version<'a>(tools: Vec<&'a ToolInfo>) -> Option<&'a ToolInfo> {
+fn find_highest_version(tools: Vec<&ToolInfo>) -> Option<&ToolInfo> {
     tools.into_iter().max_by(|a, b| {
         let a_version = &a.version;
         let b_version = &b.version;
@@ -553,6 +562,43 @@ fn find_highest_version<'a>(tools: Vec<&'a ToolInfo>) -> Option<&'a ToolInfo> {
             }
         }
     })
+}
+
+pub fn pin_tool(config: &mut ToolerConfig, tool_query: &str) -> Result<()> {
+    let tool_identifier =
+        ToolIdentifier::parse(tool_query).map_err(|e| anyhow!("Invalid tool identifier: {}", e))?;
+
+    // Find the tool in config using the exact version key
+    let tool_key = tool_identifier.config_key();
+
+    if let Some(mut tool_info) = config.tools.remove(&tool_key) {
+        // Mark the tool as pinned
+        tool_info.pinned = true;
+        config.tools.insert(tool_key, tool_info.clone());
+
+        // Also update @latest entry to point to this pinned version
+        let latest_key = tool_identifier.default_config_key();
+        if let Some(mut latest_tool) = config.tools.remove(&latest_key) {
+            latest_tool.pinned = true;
+            latest_tool.version = tool_info.version.clone();
+            latest_tool.executable_path = tool_info.executable_path.clone();
+            config.tools.insert(latest_key, latest_tool);
+        }
+
+        save_tool_configs(config)?;
+        tracing::info!(
+            "Successfully pinned {} to version {}",
+            tool_identifier.full_repo(),
+            tool_info.version
+        );
+        Ok(())
+    } else {
+        Err(anyhow!(
+            "Tool '{}' not found. Install it first with 'tooler install {}'",
+            tool_query,
+            tool_query
+        ))
+    }
 }
 
 pub fn remove_tool(config: &mut ToolerConfig, tool_query: &str) -> Result<()> {
@@ -597,7 +643,7 @@ pub fn remove_tool(config: &mut ToolerConfig, tool_query: &str) -> Result<()> {
             }
 
             // Also check for architecture-specific directories
-            if let Ok(entries) = fs::read_dir(&tool_base_dir.parent().unwrap_or(&tool_base_dir)) {
+            if let Ok(entries) = fs::read_dir(tool_base_dir.parent().unwrap_or(&tool_base_dir)) {
                 for entry in entries.flatten() {
                     let entry_path = entry.path();
                     if entry_path.is_dir() {
