@@ -31,6 +31,9 @@ pub fn find_asset_for_platform(
         system_arch
     );
 
+    let is_musl = is_musl_system();
+    tracing::debug!("System is_musl: {}", is_musl);
+
     let _default_os = vec![system_os.to_string()];
     let _default_arch = vec![system_arch.to_string()];
 
@@ -128,15 +131,30 @@ pub fn find_asset_for_platform(
                 asset_list.len()
             );
 
-            if let Some(asset) = matching_assets.first() {
-                tracing::info!("Found best match: '{}'", asset.name);
-                return Ok(Some(AssetInfo {
-                    name: asset.name.clone(),
-                    download_url: asset.browser_download_url.clone(),
-                }));
+            if !matching_assets.is_empty() {
+                // Prioritize assets based on musl match
+                let best_match = matching_assets.iter().min_by_key(|asset| {
+                    let name_lower = asset.name.to_lowercase();
+                    let asset_is_musl = name_lower.contains("musl");
+                    if asset_is_musl == is_musl {
+                        0 // Perfect match
+                    } else if !asset_is_musl && is_musl {
+                        2 // System is musl, asset is glibc
+                    } else {
+                        1 // System is glibc, asset is musl
+                    }
+                });
+
+                if let Some(asset) = best_match {
+                    tracing::info!("Found best match: '{}'", asset.name);
+                    return Ok(Some(AssetInfo {
+                        name: asset.name.clone(),
+                        download_url: asset.browser_download_url.clone(),
+                    }));
+                }
             }
 
-            // If no exact match, fall back to first asset in category
+            // If no exact match (matching_assets was empty), fall back to first asset in category
             if let Some(asset) = asset_list.first() {
                 tracing::info!("Found best match (fallback): '{}'", asset.name);
                 return Ok(Some(AssetInfo {
@@ -241,4 +259,24 @@ fn categorize_assets(
     }
 
     candidates
+}
+
+fn is_musl_system() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(output) = std::process::Command::new("ldd").arg("--version").output() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if stdout.contains("musl") || stderr.contains("musl") {
+                return true;
+            }
+        }
+        // Fallback to checking library paths
+        std::path::Path::new("/lib/ld-musl-aarch64.so.1").exists()
+            || std::path::Path::new("/lib/ld-musl-x86_64.so.1").exists()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
 }

@@ -107,14 +107,34 @@ pub async fn install_or_update_tool(
     tracing::debug!("Looking for tool with key: {}", tool_key);
 
     // Check if already installed
-    if !force_update && asset_override.is_none() {
+    if !force_update {
         if let Some(current_info) = config.tools.get(&tool_key) {
             tracing::debug!("Found tool info: {:?}", current_info);
             tracing::debug!(
                 "Checking if executable exists at: {}",
                 current_info.executable_path
             );
-            if Path::new(&current_info.executable_path).exists() {
+            
+            // If asset_override is provided, check if the specific asset exists
+            if let Some(asset_name) = asset_override {
+                let expected_asset_path = tool_version_dir.join(asset_name);
+                if expected_asset_path.exists() {
+                    tracing::info!(
+                        "Tool {} {} is already installed with asset '{}'.",
+                        tool_name,
+                        actual_version,
+                        asset_name
+                    );
+                    return Ok(PathBuf::from(&current_info.executable_path));
+                } else {
+                    tracing::info!(
+                        "Asset '{}' for {} {} not found. Re-downloading...",
+                        asset_name,
+                        tool_name,
+                        actual_version
+                    );
+                }
+            } else if Path::new(&current_info.executable_path).exists() {
                 tracing::info!(
                     "Tool {} {} is already installed.",
                     tool_name,
@@ -257,6 +277,22 @@ pub async fn install_or_update_tool(
         actual_version,
         executable_path.display()
     );
+
+    // Add pinning suggestion if asset was explicitly selected
+    if let Some(asset_name) = asset_override {
+        tracing::info!(
+            "Successfully installed {}@{} using asset '{}'.",
+            repo_full_name,
+            actual_version,
+            asset_name
+        );
+        tracing::info!(
+            "To use this asset by default in the future, run:\n  tooler pin {}@{}",
+            repo_full_name,
+            asset_name
+        );
+    }
+
     Ok(executable_path)
 }
 
@@ -355,6 +391,34 @@ pub fn find_tool_executable<'a>(
     if tool_identifier.is_pinned() {
         // Check if it's an exact version match first
         if let Some(exact_match) = config.tools.get(&tool_key) {
+            return Some(exact_match);
+        }
+
+        // If exact match not found, try matching by repo name with any version
+        // This handles cases like @latest when you have a specific version installed
+        let matching_tool = config.tools.values().find(|info| {
+            info.repo.to_lowercase() == tool_identifier.full_repo().to_lowercase()
+        });
+
+        if let Some(exact_match) = matching_tool {
+            tracing::debug!("Found tool by repo match: {}", exact_match.repo);
+            return Some(exact_match);
+        }
+
+        // Also try matching by tool name only (last part of repo)
+        let matching_by_name = config.tools.values().find(|info| {
+            info.repo.to_lowercase().ends_with(&format!("/{}", tool_identifier.tool_name().to_lowercase())) ||
+            info.repo.to_lowercase() == tool_identifier.tool_name().to_lowercase()
+        });
+
+        if let Some(exact_match) = matching_by_name {
+            tracing::debug!("Found tool by name match: {}", exact_match.repo);
+            return Some(exact_match);
+        }
+
+        // For backwards compatibility, also check the old : format
+        let old_key = format!("{}:{}", tool_identifier.full_repo(), tool_identifier.api_version());
+        if let Some(exact_match) = config.tools.get(&old_key) {
             return Some(exact_match);
         }
 

@@ -79,13 +79,21 @@ async fn main() -> Result<()> {
                         updated_count
                     );
                 } else {
-                    let tool_identifier = ToolIdentifier::parse(&tool_id)
-                        .map_err(|e| anyhow!("Invalid tool identifier: {}", e))?;
-                    tracing::info!("Attempting to update {}...", tool_id);
+                    // First find the existing tool to get the correct repo
+                    let existing_tool = find_tool_executable(&config, &tool_id);
+                    let (tool_name, repo) = if let Some(tool_info) = existing_tool {
+                        (tool_info.tool_name.clone(), tool_info.repo.clone())
+                    } else {
+                        let tool_identifier = ToolIdentifier::parse(&tool_id)
+                            .map_err(|e| anyhow!("Invalid tool identifier: {}", e))?;
+                        (tool_identifier.tool_name(), tool_identifier.full_repo())
+                    };
+                    
+                    tracing::info!("Attempting to update {}...", repo);
                     match install_or_update_tool(
                         &mut config,
-                        &tool_identifier.tool_name(),
-                        &tool_identifier.full_repo(),
+                        &tool_name,
+                        &repo,
                         Some("latest"),
                         true,
                         None,
@@ -234,6 +242,31 @@ async fn main() -> Result<()> {
             }
 
             if let Some(info) = tool_info {
+                // Show tool age with update reason
+                match info.last_accessed.parse::<DateTime<Utc>>() {
+                    Ok(last_accessed) => {
+                        let now = Utc::now();
+                        let duration = now - last_accessed;
+                        let days_since_update = duration.num_days();
+                        let hours = duration.num_hours() % 24;
+                        let minutes = duration.num_minutes() % 60;
+                        let seconds = duration.num_seconds() % 60;
+                        let is_pinned_version = info.version != "latest" && !info.version.to_lowercase().contains("latest");
+                        
+                        if is_pinned_version {
+                            tracing::info!("{} is {} days old ({}h {}m {}s)", info.repo, days_since_update, hours, minutes, seconds);
+                            if days_since_update > config.settings.update_check_days as i64 {
+                                tracing::info!("Tool is version-pinned and not auto-updated");
+                            }
+                        } else {
+                            tracing::info!("{} is {} days old ({}h {}m {}s)", info.repo, days_since_update, hours, minutes, seconds);
+                        }
+                    }
+                    Err(_) => {
+                        tracing::info!("{} age: unknown", info.repo);
+                    }
+                }
+
                 // Create shim if auto_shim is enabled
                 if config.settings.auto_shim && !cfg!(windows) {
                     create_shim_script(&config.settings.shim_dir)?;
@@ -327,51 +360,73 @@ async fn check_for_updates(config: &mut types::ToolerConfig) -> Result<()> {
     );
     let now = Utc::now();
     let mut updates_found = Vec::new();
+    let mut keys_to_update = Vec::new();
 
-    let keys_to_check: Vec<String> = config
+    // Only check for updates on unpinned tools (those without specific versions)
+    let unpinned_tools: Vec<_> = config
         .tools
-        .keys()
-        .filter(|k| !k.contains(':')) // Only non-version-pinned tools
-        .cloned()
+        .iter()
+        .filter(|(_key, info)| {
+            // Check if this looks like an unpinned tool (version contains "latest")
+            info.version == "latest" || info.version.to_lowercase().contains("latest")
+        })
         .collect();
 
-    for key in keys_to_check {
-        if let Some(info) = config.tools.get(&key).cloned() {
-            let last_accessed: DateTime<Utc> = info.last_accessed.parse()?;
-            let days_since_update = (now - last_accessed).num_days();
+    if unpinned_tools.is_empty() {
+        tracing::info!("No unpinned tools found to check for updates. (All tools are version-pinned)");
+        return Ok(());
+    }
 
-            if days_since_update > config.settings.update_check_days as i64 {
-                tracing::info!(
-                    "Checking for update for {} (current: {}, last updated: {} days ago)",
-                    info.repo,
-                    info.version,
-                    days_since_update
-                );
+    for (key, info) in unpinned_tools {
+        match info.last_accessed.parse::<DateTime<Utc>>() {
+            Ok(last_accessed) => {
+                let days_since_update = (now - last_accessed).num_days();
 
-                if let Ok(release) = install::get_gh_release_info(&info.repo, Some("latest")).await
-                {
-                    if release.tag_name != info.version {
-                        updates_found.push(format!(
-                            "Tool {} ({}) has update: {} -> {} (last updated {} days ago)",
-                            info.tool_name,
-                            info.repo,
-                            info.version,
-                            release.tag_name,
-                            days_since_update
-                        ));
-                    }
-
-                    // Update last_accessed
-                    if let Some(tool_info) = config.tools.get_mut(&key) {
-                        tool_info.last_accessed = now.to_rfc3339();
-                    }
-                } else {
-                    tracing::warn!(
-                        "Could not get latest release for {} during update check",
-                        info.repo
+                if days_since_update > config.settings.update_check_days as i64 {
+                    tracing::info!(
+                        "Checking for update for {} (current: {}, last updated: {} days ago)",
+                        info.repo,
+                        info.version,
+                        days_since_update
                     );
+
+                    if let Ok(release) = install::get_gh_release_info(&info.repo, Some("latest")).await
+                    {
+                        // Strip 'v' prefix for comparison
+                        let current_clean = info.version.trim_start_matches('v');
+                        let latest_clean = release.tag_name.trim_start_matches('v');
+                        
+                        if latest_clean != current_clean {
+                            updates_found.push(format!(
+                                "Tool {} ({}) has update: {} -> {} (last updated {} days ago)",
+                                info.tool_name,
+                                info.repo,
+                                info.version,
+                                release.tag_name,
+                                days_since_update
+                            ));
+                        }
+
+                        // Mark key for update to avoid borrowing issues
+                        keys_to_update.push(key.clone());
+                    } else {
+                        tracing::warn!(
+                            "Could not get latest release for {} during update check",
+                            info.repo
+                        );
+                    }
                 }
             }
+            Err(e) => {
+                tracing::warn!("Failed to parse timestamp for {}, skipping update check: {}", info.repo, e);
+            }
+        }
+    }
+
+    // Update last_accessed timestamps for all checked tools
+    for key in keys_to_update {
+        if let Some(tool_info) = config.tools.get_mut(&key) {
+            tool_info.last_accessed = now.to_rfc3339();
         }
     }
 
@@ -384,7 +439,7 @@ async fn check_for_updates(config: &mut types::ToolerConfig) -> Result<()> {
         eprintln!("To update, run `tooler update [repo/tool]` or `tooler update all`.");
         eprintln!("----------------------------\n");
     } else {
-        tracing::info!("No updates found or checks are not due.");
+        tracing::info!("No updates found for unpinned tools.");
     }
 
     Ok(())

@@ -11,12 +11,12 @@ pub struct ToolIdentifier {
 
 impl ToolIdentifier {
     /// Parse a tool identifier from various formats:
-    /// - "owner/repo" (latest version)
+    /// - "owner/repo" (default version)
     /// - "owner/repo@v1.2.3" (specific version)
     /// - "repo" (short name, looks up in config)
     /// - "repo@v1.2.3" (short name with version)
     pub fn parse(tool_id: &str) -> Result<Self, String> {
-        // Handle @ for version, : for backwards compatibility
+        // Handle @ for version
         let (repo_part, version_part) = if tool_id.contains('@') {
             let mut parts = tool_id.splitn(2, '@');
             let repo = parts
@@ -24,16 +24,8 @@ impl ToolIdentifier {
                 .ok_or_else(|| "Missing repository part".to_string())?;
             let version = parts.next().map(|s| s.to_string());
             (repo, version)
-        } else if tool_id.contains(':') {
-            // Backwards compatibility with old : syntax
-            let mut parts = tool_id.splitn(2, ':');
-            let repo = parts
-                .next()
-                .ok_or_else(|| "Missing repository part".to_string())?;
-            let version = parts.next().map(|s| s.to_string());
-            (repo, version)
         } else {
-            (tool_id, None)
+            (tool_id, Some("default".to_string()))
         };
 
         // Parse repository part
@@ -74,26 +66,31 @@ impl ToolIdentifier {
 
     /// Get: version string for API calls (adds 'v' prefix if needed)
     pub fn api_version(&self) -> String {
-        match &self.version {
-            Some(v) => {
+        match self.version.as_deref().unwrap_or("default") {
+            "default" => "latest".to_string(),
+            v => {
                 if v.starts_with('v') {
-                    v.clone()
+                    v.to_string()
                 } else {
                     format!("v{}", v)
                 }
             }
-            None => "latest".to_string(),
         }
     }
 
     /// Get: configuration key for storing this tool
     pub fn config_key(&self) -> String {
-        format!("{}:{}", self.full_repo(), self.api_version())
+        let version = self.version.as_deref().unwrap_or("default");
+        if version == "default" {
+            format!("{}@latest", self.full_repo())
+        } else {
+            format!("{}@{}", self.full_repo(), version)
+        }
     }
 
     /// Check if this is a version-pinned tool
     pub fn is_pinned(&self) -> bool {
-        self.version.is_some()
+        self.version.is_some() && self.version.as_deref().unwrap_or("default") != "default"
     }
 }
 

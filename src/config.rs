@@ -5,7 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 
 pub const APP_NAME: &str = "tooler";
-pub const CONFIG_DIR_NAME: &str = ".tooler";
+pub const CONFIG_DIR_NAME: &str = "tooler";
 pub const TOOLS_DIR_NAME: &str = "tools";
 pub const CONFIG_FILE_NAME: &str = "config.json";
 
