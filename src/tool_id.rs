@@ -69,7 +69,13 @@ impl ToolIdentifier {
         match self.version.as_deref().unwrap_or("default") {
             "default" => "latest".to_string(),
             v => {
-                if v.starts_with('v') {
+                // Don't modify versions that contain special characters like slashes
+                // or are non-numeric (e.g., "infisical-cli/v0.41.90", "master", "tip")
+                // Also preserve existing 'v' prefixes
+                if v.contains('/')
+                    || v.chars().next().is_some_and(|c| !c.is_ascii_digit())
+                    || v.starts_with('v')
+                {
                     v.to_string()
                 } else {
                     format!("v{}", v)
@@ -87,8 +93,6 @@ impl ToolIdentifier {
             format!("{}@{}", self.full_repo(), version)
         }
     }
-
-
 
     /// Get: configuration key for a default (latest) tool
     pub fn default_config_key(&self) -> String {

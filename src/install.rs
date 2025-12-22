@@ -22,13 +22,17 @@ pub async fn get_gh_release_info(
         )
     } else {
         // Smart version handling: don't add 'v' prefix for non-numeric versions like "tip", "master"
+        // or versions containing slashes like "infisical-cli/v0.41.90"
         // but preserve existing 'v' prefixes and add 'v' for numeric versions
-        let version = if version.starts_with('v')
-            || version.chars().next().is_some_and(|c| c.is_ascii_digit())
-        {
+        let version = if version.starts_with('v') {
             version
-        } else {
+        } else if version.chars().next().is_some_and(|c| c.is_ascii_digit())
+            && !version.contains('/')
+        {
+            // Only add 'v' to purely numeric versions without slashes
             &format!("v{}", version)
+        } else {
+            version
         };
         format!(
             "https://api.github.com/repos/{}/releases/tags/{}",
@@ -97,7 +101,9 @@ pub async fn install_or_update_tool(
         repo_full_name.replace('/', "__"),
         system_info.arch
     ));
-    let tool_version_dir = tool_install_base_dir.join(actual_version);
+    // Sanitize version for filesystem use (replace slashes with double underscores)
+    let sanitized_version = actual_version.replace('/', "__");
+    let tool_version_dir = tool_install_base_dir.join(&sanitized_version);
 
     tracing::debug!(
         "Tool installation base directory: {}",
@@ -501,7 +507,7 @@ pub fn find_tool_executable<'a>(
 
 /// Check if a requested version matches an existing version
 /// Supports semver ranges (e.g., "1.5" matches "1.5.2", "1.5.0") and exact string matches
-fn version_matches(requested: &str, existing: &str) -> bool {
+pub(crate) fn version_matches(requested: &str, existing: &str) -> bool {
     // Clean versions (remove 'v' prefix if present)
     let requested_clean = requested.trim_start_matches('v');
     let existing_clean = existing.trim_start_matches('v');
@@ -541,7 +547,7 @@ fn version_matches(requested: &str, existing: &str) -> bool {
 }
 
 /// Find highest version among matching tools
-fn find_highest_version(tools: Vec<&ToolInfo>) -> Option<&ToolInfo> {
+pub(crate) fn find_highest_version(tools: Vec<&ToolInfo>) -> Option<&ToolInfo> {
     tools.into_iter().max_by(|a, b| {
         let a_version = &a.version;
         let b_version = &b.version;
@@ -564,6 +570,7 @@ fn find_highest_version(tools: Vec<&ToolInfo>) -> Option<&ToolInfo> {
     })
 }
 
+#[cfg_attr(test, allow(dead_code))] // Allow dead code for testing
 pub fn pin_tool(config: &mut ToolerConfig, tool_query: &str) -> Result<()> {
     let tool_identifier =
         ToolIdentifier::parse(tool_query).map_err(|e| anyhow!("Invalid tool identifier: {}", e))?;

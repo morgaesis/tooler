@@ -3,9 +3,9 @@ mod config;
 mod download;
 mod install;
 mod platform;
+mod tests;
 mod tool_id;
 mod types;
-mod tests;
 
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
@@ -110,24 +110,22 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Pull { tool_id } => {
-            // First find the existing tool to get the correct repo
-            let existing_tool = find_tool_executable(&config, &tool_id);
-            let (tool_name, repo) = if let Some(tool_info) = existing_tool {
-                (tool_info.tool_name.clone(), tool_info.repo.clone())
-            } else {
-                let tool_identifier = ToolIdentifier::parse(&tool_id)
-                    .map_err(|e| anyhow!("Invalid tool identifier: {}", e))?;
-                (tool_identifier.tool_name(), tool_identifier.full_repo())
-            };
+            let tool_identifier = ToolIdentifier::parse(&tool_id)
+                .map_err(|e| anyhow!("Invalid tool identifier: {}", e))?;
 
-            tracing::info!("Pulling latest version of {}...", repo);
-            match install_or_update_tool(&mut config, &tool_name, &repo, Some("latest"), true, None)
-                .await
+            let repo = tool_identifier.full_repo();
+            let tool_name = tool_identifier.tool_name();
+            let api_version = tool_identifier.api_version();
+            let version = Some(api_version.as_str());
+
+            tracing::info!("Pulling version {} of {}...", api_version, repo);
+            match install_or_update_tool(&mut config, &tool_name, &repo, version, true, None).await
             {
                 Ok(path) => {
                     tracing::info!(
-                        "Successfully pulled latest version of {} to {}",
+                        "Successfully pulled {} {} to {}",
                         repo,
+                        api_version,
                         path.display()
                     );
                 }

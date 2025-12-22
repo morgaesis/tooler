@@ -127,18 +127,7 @@ fn extract_tar_gz(archive_path: &Path, extract_dir: &Path) -> Result<()> {
     let decoder = GzDecoder::new(file);
     let mut archive = Archive::new(decoder);
 
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let outpath = extract_dir.join(entry.path()?);
-
-        // Security check for path traversal
-        if !outpath.starts_with(extract_dir) {
-            tracing::warn!("Skipping malicious path in tar: {:?}", entry.path()?);
-            continue;
-        }
-
-        entry.unpack(&outpath)?;
-    }
+    archive.unpack(extract_dir)?;
 
     Ok(())
 }
@@ -148,18 +137,7 @@ fn extract_tar_xz(archive_path: &Path, extract_dir: &Path) -> Result<()> {
     let decoder = xz2::read::XzDecoder::new(file);
     let mut archive = Archive::new(decoder);
 
-    for entry in archive.entries()? {
-        let mut entry = entry?;
-        let outpath = extract_dir.join(entry.path()?);
-
-        // Security check for path traversal
-        if !outpath.starts_with(extract_dir) {
-            tracing::warn!("Skipping malicious path in tar: {:?}", entry.path()?);
-            continue;
-        }
-
-        entry.unpack(&outpath)?;
-    }
+    archive.unpack(extract_dir)?;
 
     Ok(())
 }

@@ -11,6 +11,8 @@ A CLI tool manager for GitHub Releases written in Rust.
 - **Auto-shimming**: Creates command-line shortcuts for installed tools
 - **Update Checking**: Automatically checks for tool updates
 - **Configuration**: Persistent configuration with environment variable overrides
+- **Version Pinning**: Pin tools to specific versions to prevent auto-updates
+- **Complex Version Support**: Handle GitHub release tags with slashes (e.g., infisical-cli/v0.41.90)
 
 ## Installation
 
@@ -28,10 +30,12 @@ cd tooler
 cargo install --path .
 ```
 
-### From crates.io (when published)
+### From Source (recommended)
 
 ```bash
-cargo install tooler
+git clone https://github.com/morgaesis/tooler
+cd tooler
+cargo install --path .
 ```
 
 ## Usage
@@ -39,23 +43,11 @@ cargo install tooler
 ### Basic Commands
 
 ```bash
-# Run a tool (downloads and installs if needed)
-tooler run nektos/act
-
 # Run a specific version
 tooler run nektos/act@v0.2.79 -- --help
 
-# List installed tools
-tooler list
-
-# Update a tool
-tooler update nektos/act
-
-# Update all tools
-tooler update --all
-
-# Remove a tool
-tooler remove nektos/act
+# Run with complex GitHub tag (tags with slashes)
+tooler run infisical/infisical@infisical-cli/v0.41.90 -- --help
 ```
 
 ### Configuration

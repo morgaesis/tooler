@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand};
 #[command(version)]
 #[command(after_help = "Examples:
   tooler run nektos/act@v0.2.79 -- --help                   # Run specific version with args
+  tooler run infisical/infisical@infisical-cli/v0.41.90      # Run with complex GitHub tag
   tooler run adrienverge/yamllint                           # Run Python tool from .whl asset
   tooler run argoproj/argo-cd --asset argocd-darwin-amd64   # Run with an explicit asset
   tooler run yamllint .                                     # Run a tool previously fetched
@@ -15,8 +16,9 @@ use clap::{Parser, Subcommand};
   tooler update nektos/act                                  # Update to latest version
   tooler update yamllint                                    # Update short-name to latest version
   tooler update all                                         # Update all non-pinned tools
-  tooler pull nektos/act                                    # Pull latest version without updating
+  tooler pull infisical/infisical@infisical-cli/v0.41.90    # Pull complex tag without updating
   tooler remove nektos/act                                  # Remove all versions of a tool
+  tooler pin nektos/act@v0.2.79                           # Pin tool to specific version
 
   tooler config get                                         # Show all settings
   tooler config set auto_shim=true                          # Enable auto-shimming
