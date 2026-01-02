@@ -55,14 +55,14 @@ tooler run infisical/infisical@infisical-cli/v0.41.90 -- --help
 tooler config get
 
 # Get a specific setting
-tooler config get update_check_days
+tooler config get update-check-days
 
-# Set a setting
-tooler config set auto_shim=true
-tooler config set shim_dir=/home/user/.local/bin
+# Set a setting (both formats supported)
+tooler config set auto-shim=true
+tooler config set shim-dir /home/user/.local/bin
 
 # Unset a setting (revert to default)
-tooler config unset shim_dir
+tooler config unset shim-dir
 ```
 
 ### Advanced Usage
@@ -85,9 +85,9 @@ tooler run act -- --help
 
 Settings are stored in `~/.config/.tooler/config.json` and can be overridden with environment variables:
 
-- `update_check_days`: Days between update checks (default: 60, env: `TOOLER_UPDATE_CHECK_DAYS`)
-- `auto_shim`: Create command-line shims (default: false, env: `TOOLER_AUTO_SHIM`)
-- `shim_dir`: Directory for shims (default: `~/.local/bin`, env: `TOOLER_SHIM_DIR`)
+- `update-check-days`: Days between update checks (default: 60, env: `TOOLER_UPDATE_CHECK_DAYS`)
+- `auto-shim`: Create command-line shims (default: false, env: `TOOLER_AUTO_SHIM`)
+- `shim-dir`: Directory for shims (default: `~/.local/bin`, env: `TOOLER_SHIM_DIR`)
 
 ## Architecture Support
 
