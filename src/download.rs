@@ -45,6 +45,7 @@ pub fn extract_archive(
     archive_path: &Path,
     extract_dir: &Path,
     tool_name: &str,
+    repo_full_name: &str,
 ) -> Result<PathBuf> {
     tracing::info!(
         "Extracting {}...",
@@ -68,13 +69,19 @@ pub fn extract_archive(
         ));
     }
 
-    let executable_path = find_executable_in_extracted(extract_dir, tool_name, &system_info.os)
-        .ok_or_else(|| {
-            anyhow!(
-                "Could not find executable for {} in extracted archive",
-                tool_name
-            )
-        })?;
+    let executable_path = find_executable_in_extracted(
+        extract_dir,
+        tool_name,
+        repo_full_name,
+        &system_info.os,
+        archive_path,
+    )
+    .ok_or_else(|| {
+        anyhow!(
+            "Could not find executable for {} in extracted archive",
+            tool_name
+        )
+    })?;
 
     // Make executable on Unix-like systems
     if system_info.os != "windows" {
@@ -145,11 +152,14 @@ fn extract_tar_xz(archive_path: &Path, extract_dir: &Path) -> Result<()> {
 fn find_executable_in_extracted(
     extract_dir: &Path,
     tool_name: &str,
+    repo_full_name: &str,
     os_system: &str,
+    archive_path: &Path,
 ) -> Option<PathBuf> {
     let mut candidates = Vec::new();
     let tool_name_lower = tool_name.to_lowercase();
 
+    // Base target names from tool name
     let mut target_names = if os_system == "windows" {
         vec![
             format!("{}.exe", tool_name_lower),
@@ -161,13 +171,26 @@ fn find_executable_in_extracted(
         vec![tool_name_lower.clone(), format!("{}.sh", tool_name_lower)]
     };
 
-    // Add common aliases where the binary name differs from the repo/tool name
-    if tool_name_lower == "cli" || tool_name_lower == "github-cli" {
-        target_names.push("gh".to_string());
-        if os_system == "windows" {
-            target_names.push("gh.exe".to_string());
+    // Also consider the repo name parts as high-priority candidates
+    for part in repo_full_name.split('/') {
+        let p = part.to_lowercase();
+        if !target_names.contains(&p) {
+            target_names.push(p);
         }
     }
+
+    // Extract potential names from the archive filename itself
+    // e.g., "gh_2.83.2_linux_amd64.tar.gz" -> "gh"
+    let archive_name = archive_path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    let asset_stem = archive_name.split('.').next().unwrap_or("");
+    let asset_parts: Vec<&str> = asset_stem
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|s| s.len() > 1 && !s.chars().all(|c| c.is_numeric()))
+        .collect();
 
     for entry in WalkDir::new(extract_dir).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
@@ -182,21 +205,31 @@ fn find_executable_in_extracted(
                 score += 20;
             }
 
-            // Higher score for exact name match
+            // Higher score for exact name match with tool/repo parts
             if target_names.contains(&file_name) {
                 score += 100;
             } else if target_names.contains(&file_stem) {
                 score += 90;
-            } else if file_name.contains(&tool_name_lower) {
-                score += 50;
             }
 
-            // Penalize deeper paths
+            // Bonus for matching parts of the asset name (very strong signal)
+            if asset_parts.contains(&file_name.as_str()) {
+                score += 80;
+            } else if asset_parts.contains(&file_stem.as_str()) {
+                score += 70;
+            }
+
+            // General fuzzy match with tool name
+            if file_name.contains(&tool_name_lower) {
+                score += 30;
+            }
+
+            // Penalize deeper paths to prefer binaries in bin/ or root over nested examples/
             let depth = path
                 .strip_prefix(extract_dir)
                 .ok()
                 .map_or(0, |p| p.components().count());
-            score -= (depth as i32) * 10;
+            score -= (depth as i32) * 5;
 
             if score > 0 {
                 candidates.push((score, path.to_path_buf()));
@@ -205,6 +238,15 @@ fn find_executable_in_extracted(
     }
 
     candidates.sort_by_key(|(score, _)| -(*score));
+
+    if let Some((score, path)) = candidates.first() {
+        tracing::debug!(
+            "Found candidate executable: {} with score {}",
+            path.display(),
+            score
+        );
+    }
+
     candidates.into_iter().map(|(_, path)| path).next()
 }
 

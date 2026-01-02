@@ -160,7 +160,16 @@ async fn main() -> Result<()> {
         }
         Commands::Pull { tool_id } => {
             let tool_identifier = match ToolIdentifier::parse(&tool_id) {
-                Ok(id) => id,
+                Ok(id) => {
+                    if id.author == "unknown" {
+                        eprintln!("\nError: Tool '{}' not found locally.", tool_id);
+                        eprintln!(
+                            "To install a new tool from GitHub, use the full 'owner/repo' format."
+                        );
+                        std::process::exit(1);
+                    }
+                    id
+                }
                 Err(e) => {
                     if tool_id.starts_with('-') {
                         eprintln!(
@@ -195,7 +204,7 @@ async fn main() -> Result<()> {
                     );
                 }
                 Err(e) => {
-                    tracing::error!("Failed to pull tool '{}': {}", tool_id, e);
+                    tracing::error!("Failed to install tool '{}': {}", tool_id, e);
                     if e.to_string().contains("404") {
                         eprintln!("\nError: Tool '{}' not found on GitHub.", tool_id);
                         eprintln!(
@@ -340,6 +349,15 @@ async fn main() -> Result<()> {
             // Install if not found or if asset override is used
             if tool_info.is_none() || asset.is_some() {
                 if tool_info.is_none() {
+                    // Check if it's a full repo format before attempting to install
+                    if tool_identifier.author == "unknown" {
+                        eprintln!("\nError: Tool '{}' not found locally.", tool_id);
+                        eprintln!(
+                            "To install a new tool from GitHub, use the full 'owner/repo' format."
+                        );
+                        std::process::exit(1);
+                    }
+
                     tracing::info!(
                         "Tool {} not found locally or is corrupted. Attempting to install...",
                         tool_id

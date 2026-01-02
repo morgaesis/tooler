@@ -221,7 +221,12 @@ pub async fn install_or_update_tool(
         let cached_asset_path = tool_version_dir.join(&asset_info.name);
         fs::copy(&temp_download_path, &cached_asset_path)?;
 
-        extract_archive(&temp_download_path, &tool_version_dir, tool_name)?
+        extract_archive(
+            &temp_download_path,
+            &tool_version_dir,
+            tool_name,
+            repo_full_name,
+        )?
     } else {
         // Direct executable
         let temp_dir = TempDir::new()?;
@@ -433,6 +438,27 @@ pub fn find_tool_executable<'a>(
             return Some(exact_match);
         }
 
+        // Also try matching by actual executable name
+        let matching_by_exec = config.tools.values().find(|info| {
+            let path = Path::new(&info.executable_path);
+            let file_name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            let file_stem = path
+                .file_stem()
+                .map(|n| n.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+
+            file_name == tool_identifier.tool_name().to_lowercase()
+                || file_stem == tool_identifier.tool_name().to_lowercase()
+        });
+
+        if let Some(exact_match) = matching_by_exec {
+            tracing::debug!("Found tool by executable name match: {}", exact_match.repo);
+            return Some(exact_match);
+        }
+
         // For backwards compatibility, also check the old : format
         let old_key = format!(
             "{}:{}",
@@ -454,8 +480,11 @@ pub fn find_tool_executable<'a>(
                          info.repo.to_lowercase() == tool_identifier.full_repo().to_lowercase()) ||
                         info.repo.to_lowercase().ends_with(&format!("/{}", tool_identifier.tool_name().to_lowercase())) ||
                         info.repo.to_lowercase() == tool_identifier.tool_name().to_lowercase() ||
-                        // Also match if requested tool name is part of repo
-                        info.repo.to_lowercase().contains(&format!("/{}", tool_identifier.tool_name().to_lowercase()));
+                        // Also match by actual executable name
+                        Path::new(&info.executable_path).file_name().map(|n| n.to_string_lossy().to_lowercase()) == Some(tool_identifier.tool_name().to_lowercase()) ||
+                        Path::new(&info.executable_path).file_stem().map(|n| n.to_string_lossy().to_lowercase()) == Some(tool_identifier.tool_name().to_lowercase()) ||
+                        // Also match if requested tool name is part of the repo name
+                        info.repo.to_lowercase().contains(&tool_identifier.tool_name().to_lowercase());
 
                     tracing::trace!("Name match check for {}: {} (repo: {})",
                         tool_identifier.tool_name(), name_matches, info.repo);
@@ -496,8 +525,11 @@ pub fn find_tool_executable<'a>(
                 // Match by repo name alone (e.g., "k9s" matches repo "k9s")
                 info.repo.to_lowercase().ends_with(&format!("/{}", tool_identifier.tool_name().to_lowercase())) ||
                 info.repo.to_lowercase() == tool_identifier.tool_name().to_lowercase() ||
-                // Also match if requested tool name is part of repo
-                info.repo.to_lowercase().contains(&format!("/{}", tool_identifier.tool_name().to_lowercase()))
+                // Also match by actual executable name
+                Path::new(&info.executable_path).file_name().map(|n| n.to_string_lossy().to_lowercase()) == Some(tool_identifier.tool_name().to_lowercase()) ||
+                Path::new(&info.executable_path).file_stem().map(|n| n.to_string_lossy().to_lowercase()) == Some(tool_identifier.tool_name().to_lowercase()) ||
+                // Also match if requested tool name is part of the repo name
+                info.repo.to_lowercase().contains(&tool_identifier.tool_name().to_lowercase())
             })
             .collect();
 
