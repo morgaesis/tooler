@@ -34,14 +34,16 @@ jobs:
       - name: Run tests
         run: cargo test
 
-      - name: Install yamllint
-        run: sudo apt-get update && sudo apt-get install -y yamllint
+      - name: Yamllint
+        uses: karancode/yamllint-github-action@master
+        with:
+          yamllint_file_or_dir: '.'
+          yamllint_comment: false
 
-      - name: Yamllint check
-        run: yamllint .
-
-      - name: Markdownlint check
-        run: npx markdownlint-cli2 README.md
+      - name: Markdownlint
+        uses: DavidAnson/markdownlint-cli2-action@v19
+        with:
+          globs: 'README.md'
 
   build_dry_run:
     name: Build dry-run (${{ matrix.target }})
