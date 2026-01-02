@@ -56,15 +56,16 @@ pub async fn get_gh_release_info(
     let response = request.send().await?;
     if !response.status().is_success() {
         let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Err(anyhow!(
+                "Tool repository or version not found on GitHub. (Status: 404)"
+            ));
+        }
         let error_text = response
             .text()
             .await
             .unwrap_or_else(|_| "Unable to read error response".to_string());
-        return Err(anyhow!(
-            "GitHub API request failed: {} - {}",
-            status,
-            error_text
-        ));
+        return Err(anyhow!("GitHub API request failed: {} - {}", status, error_text));
     }
 
     let release: GitHubRelease = response.json().await?;

@@ -180,6 +180,11 @@ mod tests {
     fn test_pin_tool_functionality() {
         use crate::install::pin_tool;
         use crate::types::ToolInfo;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+        std::env::set_var("TOOLER_CONFIG_PATH", &config_path);
 
         let now = Utc::now().to_rfc3339();
         let mut config = ToolerConfig::default();
@@ -218,11 +223,12 @@ mod tests {
 
         // Test pinning non-existent tool
         assert!(pin_tool(&mut config, "owner/nonexistent@1.0.0").is_err());
+
+        std::env::remove_var("TOOLER_CONFIG_PATH");
     }
 
     #[test]
     fn test_config_with_pinned_tools() {
-        use crate::config::save_tool_configs;
         use crate::types::ToolInfo;
 
         use tempfile::TempDir;
@@ -263,19 +269,12 @@ mod tests {
         );
 
         // Save and load config
-        assert!(save_tool_configs(&config).is_ok());
+        assert!(crate::config::save_tool_configs_to_path(&config, &_config_path).is_ok());
 
-        // Verify config can be reloaded and preserves pinned status
-        let loaded_config = crate::config::load_tool_configs().unwrap_or_default();
-
-        if let Some(_pinned_tool) = loaded_config
-            .tools
-            .iter()
-            .find(|(k, _)| k.contains("pinned"))
-        {
-            // This would verify the pinned status survives config save/load cycle
-            // but we need to be careful not to affect the actual config file
-        }
+        // Verify config can be reloaded
+        let content = std::fs::read_to_string(&_config_path).unwrap();
+        let loaded_config: crate::types::ToolerConfig = serde_json::from_str(&content).unwrap();
+        assert_eq!(loaded_config.tools.len(), 2);
     }
 
     #[test]
@@ -314,6 +313,15 @@ mod tests {
                 assert!(tool_args.is_empty());
             }
             _ => panic!("Expected run command"),
+        }
+
+        // Test info command
+        let cli = Cli::parse_from(["tooler", "info", "opencode"]);
+        match cli.command {
+            crate::cli::Commands::Info { tool_id } => {
+                assert_eq!(tool_id, "opencode");
+            }
+            _ => panic!("Expected info command"),
         }
     }
 

@@ -3,32 +3,14 @@ use clap::{Parser, Subcommand};
 #[derive(Parser)]
 #[command(name = "tooler")]
 #[command(about = "A CLI tool manager for GitHub Releases")]
-#[command(version)]
-#[command(after_help = "Examples:
-  tooler run nektos/act@v0.2.79 -- --help                   # Run specific version with args
-  tooler run infisical/infisical@infisical-cli/v0.41.90      # Run with complex GitHub tag
-  tooler run adrienverge/yamllint                           # Run Python tool from .whl asset
-  tooler run argoproj/argo-cd --asset argocd-darwin-amd64   # Run with an explicit asset
-  tooler run yamllint .                                     # Run a tool previously fetched
-  tooler -v run act                                         # Run verbosely
-
-  tooler list                                               # List all installed tools
-  tooler update nektos/act                                  # Update to latest version
-  tooler update yamllint                                    # Update short-name to latest version
-  tooler update all                                         # Update all non-pinned tools
-  tooler pull infisical/infisical@infisical-cli/v0.41.90    # Pull complex tag without updating
-  tooler remove nektos/act                                  # Remove all versions of a tool
-  tooler pin nektos/act@v0.2.79                           # Pin tool to specific version
-
-  tooler config get                                         # Show all settings
-  tooler config set auto_shim=true                          # Enable auto-shimming
-  tooler config set shim_dir=/home/user/.local/bin          # Set shim directory
-  tooler config unset shim_dir                              # Unset shim_dir (reverts to default)")]
+#[command(version, propagate_version = true)]
 pub struct Cli {
-    #[arg(short, long, action = clap::ArgAction::Count)]
+    /// Increase verbosity (use multiple times for more detail)
+    #[arg(short, long, action = clap::ArgAction::Count, global = true)]
     pub verbose: u8,
 
-    #[arg(short, long)]
+    /// Reduce output to errors only
+    #[arg(short, long, global = true)]
     pub quiet: bool,
 
     #[command(subcommand)]
@@ -38,6 +20,11 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Run a tool
+    #[command(
+        allow_hyphen_values = true,
+        disable_help_flag = true,
+        after_help = "Examples:\n  tooler run sst/opencode --version\n  tooler run nektos/act@v0.2.79 --help\n  tooler -v run act\n\nTo see help for this command, use 'tooler help run'."
+    )]
     Run {
         /// GitHub repository (e.g., 'owner/repo@vX.Y.Z')
         tool_id: String,
@@ -73,6 +60,12 @@ pub enum Commands {
     /// Pin a tool to a specific version
     Pin {
         /// Tool to pin (e.g., 'owner/repo@version')
+        tool_id: String,
+    },
+
+    /// Show detailed information about a tool
+    Info {
+        /// Tool to show info for (e.g., 'owner/repo' or 'tool-name')
         tool_id: String,
     },
 

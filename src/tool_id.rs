@@ -16,6 +16,17 @@ impl ToolIdentifier {
     /// - "repo" (short name, looks up in config)
     /// - "repo@v1.2.3" (short name with version)
     pub fn parse(tool_id: &str) -> Result<Self, String> {
+        if tool_id.is_empty() {
+            return Err("Tool identifier cannot be empty".to_string());
+        }
+
+        if tool_id.starts_with('-') {
+            return Err(format!(
+                "Invalid tool identifier '{}'. It looks like a CLI flag.",
+                tool_id
+            ));
+        }
+
         // Handle @ for version
         let (repo_part, version_part) = if tool_id.contains('@') {
             let mut parts = tool_id.splitn(2, '@');

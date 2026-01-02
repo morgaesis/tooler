@@ -9,7 +9,7 @@ mod types;
 
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use cli::{Cli, Commands, ConfigAction};
 use config::{load_tool_configs, normalize_key, save_tool_configs};
 use install::{find_tool_executable, install_or_update_tool, pin_tool, remove_tool};
@@ -39,8 +39,24 @@ async fn main() -> Result<()> {
             list_installed_tools(&config);
         }
         Commands::Remove { tool_id } => {
-            let tool_identifier = ToolIdentifier::parse(&tool_id)
-                .map_err(|e| anyhow!("Invalid tool identifier: {}", e))?;
+            let tool_identifier = match ToolIdentifier::parse(&tool_id) {
+                Ok(id) => id,
+                Err(e) => {
+                    if tool_id.starts_with('-') {
+                        eprintln!(
+                            "\nError: Invalid tool identifier '{}'. It looks like a flag.",
+                            tool_id
+                        );
+                        eprintln!("Tooler flags (like -v, --quiet) must be placed BEFORE the subcommand: 'tooler {} remove ...'", tool_id);
+                        eprintln!(
+                            "Subcommand flags must be placed AFTER the tool name: 'tooler remove <tool> {}'",
+                            tool_id
+                        );
+                        std::process::exit(1);
+                    }
+                    return Err(anyhow!("Invalid tool identifier: {}", e));
+                }
+            };
             remove_tool(&mut config, &tool_identifier.config_key())?;
         }
         Commands::Update { tool_id } => {
@@ -78,12 +94,30 @@ async fn main() -> Result<()> {
                 } else {
                     // First find the existing tool to get the correct repo
                     let existing_tool = find_tool_executable(&config, &tool_id);
-                    let (tool_name, repo) = if let Some(tool_info) = existing_tool {
-                        (tool_info.tool_name.clone(), tool_info.repo.clone())
+                    let (tool_name, repo, tool_identifier) = if let Some(tool_info) = existing_tool {
+                        (
+                            tool_info.tool_name.clone(),
+                            tool_info.repo.clone(),
+                            ToolIdentifier::parse(&tool_id).ok(),
+                        )
                     } else {
-                        let tool_identifier = ToolIdentifier::parse(&tool_id)
-                            .map_err(|e| anyhow!("Invalid tool identifier: {}", e))?;
-                        (tool_identifier.tool_name(), tool_identifier.full_repo())
+                        let tool_identifier = match ToolIdentifier::parse(&tool_id) {
+                            Ok(id) => id,
+                            Err(e) => {
+                                if tool_id.starts_with('-') {
+                                    eprintln!("\nError: Invalid tool identifier '{}'. It looks like a flag.", tool_id);
+                                    eprintln!("Tooler flags (like -v, --quiet) must be placed BEFORE the subcommand: 'tooler {} update ...'", tool_id);
+                                    eprintln!("Subcommand flags must be placed AFTER the tool name: 'tooler update <tool> {}'", tool_id);
+                                    std::process::exit(1);
+                                }
+                                return Err(anyhow!("Invalid tool identifier: {}", e));
+                            }
+                        };
+                        (
+                            tool_identifier.tool_name(),
+                            tool_identifier.full_repo(),
+                            Some(tool_identifier),
+                        )
                     };
 
                     tracing::info!("Attempting to update {}...", repo);
@@ -99,7 +133,21 @@ async fn main() -> Result<()> {
                     {
                         Ok(_) => tracing::info!("{} updated successfully", tool_id),
                         Err(e) => {
-                            tracing::error!("Failed to update {}: {}", tool_id, e);
+                            tracing::error!("Failed to update tool '{}': {}", tool_id, e);
+                            if e.to_string().contains("404") {
+                                eprintln!("\nError: Tool '{}' not found on GitHub.", tool_id);
+                                eprintln!(
+                                    "Please check that the repository 'https://github.com/{}' exists.",
+                                    repo
+                                );
+                                if let Some(id) = tool_identifier {
+                                    if id.author == "unknown" {
+                                        eprintln!("\nTip: If you're trying to install a new tool, use the full 'owner/repo' format.");
+                                    }
+                                }
+                            } else {
+                                eprintln!("\nError: {}", e);
+                            }
                             std::process::exit(1);
                         }
                     }
@@ -110,8 +158,24 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Pull { tool_id } => {
-            let tool_identifier = ToolIdentifier::parse(&tool_id)
-                .map_err(|e| anyhow!("Invalid tool identifier: {}", e))?;
+            let tool_identifier = match ToolIdentifier::parse(&tool_id) {
+                Ok(id) => id,
+                Err(e) => {
+                    if tool_id.starts_with('-') {
+                        eprintln!(
+                            "\nError: Invalid tool identifier '{}'. It looks like a flag.",
+                            tool_id
+                        );
+                        eprintln!("Tooler flags (like -v, --quiet) must be placed BEFORE the subcommand: 'tooler {} pull ...'", tool_id);
+                        eprintln!(
+                            "Subcommand flags must be placed AFTER the tool name: 'tooler pull <tool> {}'",
+                            tool_id
+                        );
+                        std::process::exit(1);
+                    }
+                    return Err(anyhow!("Invalid tool identifier: {}", e));
+                }
+            };
 
             let repo = tool_identifier.full_repo();
             let tool_name = tool_identifier.tool_name();
@@ -130,7 +194,21 @@ async fn main() -> Result<()> {
                     );
                 }
                 Err(e) => {
-                    tracing::error!("Failed to pull {}: {}", tool_id, e);
+                    tracing::error!("Failed to pull tool '{}': {}", tool_id, e);
+                    if e.to_string().contains("404") {
+                        eprintln!("\nError: Tool '{}' not found on GitHub.", tool_id);
+                        eprintln!(
+                            "Please check that the repository 'https://github.com/{}' exists.",
+                            tool_identifier.full_repo()
+                        );
+                        if tool_identifier.author == "unknown" {
+                            eprintln!(
+                                "\nTip: If you're trying to install a new tool, use the full 'owner/repo' format."
+                            );
+                        }
+                    } else {
+                        eprintln!("\nError: {}", e);
+                    }
                     std::process::exit(1);
                 }
             }
@@ -221,8 +299,37 @@ async fn main() -> Result<()> {
             tool_args,
             asset,
         } => {
-            let tool_identifier = ToolIdentifier::parse(&tool_id)
-                .map_err(|e| anyhow!("Invalid tool identifier: {}", e))?;
+            let tool_identifier = match ToolIdentifier::parse(&tool_id) {
+                Ok(id) => id,
+                Err(_) => {
+                    if tool_id.starts_with('-') {
+                        // If it's -h or --help, let's show the subcommand help
+                        if tool_id == "-h" || tool_id == "--help" {
+                            let mut cmd = Cli::command();
+                            let sub_help = cmd
+                                .get_subcommands_mut()
+                                .find(|s| s.get_name() == "run")
+                                .map(|s| s.render_help());
+
+                            if let Some(help) = sub_help {
+                                println!("{}", help);
+                                std::process::exit(0);
+                            }
+                        }
+                        eprintln!(
+                            "\nError: Invalid tool identifier '{}'. It looks like a flag.",
+                            tool_id
+                        );
+                        eprintln!("Tooler flags (like -v, --quiet) must be placed BEFORE the subcommand: 'tooler {} run ...'", tool_id);
+                        eprintln!(
+                            "Subcommand flags must be placed AFTER the tool name: 'tooler run <tool> {}'",
+                            tool_id
+                        );
+                        std::process::exit(1);
+                    }
+                    return Err(anyhow!("Invalid tool identifier: {}", tool_id));
+                }
+            };
             let version_req = tool_identifier.api_version();
             // Check for updates if not a pinned version
             if !tool_identifier.is_pinned() {
@@ -252,7 +359,21 @@ async fn main() -> Result<()> {
                         tool_info = find_tool_executable(&config, &tool_id);
                     }
                     Err(e) => {
-                        tracing::error!("Failed to install tool: {}", e);
+                        tracing::error!("Failed to install tool '{}': {}", tool_id, e);
+                        if e.to_string().contains("404") {
+                            eprintln!("\nError: Tool '{}' not found on GitHub.", tool_id);
+                            eprintln!(
+                                "Please check that the repository 'https://github.com/{}' exists.",
+                                tool_identifier.full_repo()
+                            );
+                            if tool_identifier.author == "unknown" {
+                                eprintln!(
+                                    "\nTip: If you're trying to install a new tool, use the full 'owner/repo' format."
+                                );
+                            }
+                        } else {
+                            eprintln!("\nError: {}", e);
+                        }
                         std::process::exit(1);
                     }
                 }
@@ -326,6 +447,26 @@ async fn main() -> Result<()> {
         }
         Commands::Pin { tool_id } => {
             pin_tool(&mut config, &tool_id)?;
+        }
+        Commands::Info { tool_id } => {
+            if let Some(info) = find_tool_executable(&config, &tool_id) {
+                println!("--- Tool Information ---");
+                println!("  Name:          {}", info.tool_name);
+                println!("  Repository:    {}", info.repo);
+                println!("  Version:       {}", info.version);
+                println!("  Installed at:  {}", info.installed_at);
+                println!("  Last accessed: {}", info.last_accessed);
+                println!("  Install type:  {}", info.install_type);
+                println!("  Pinned:        {}", info.pinned);
+                println!("  Path:          {}", info.executable_path);
+                println!("------------------------");
+            } else {
+                tracing::error!(
+                    "Tool '{}' not found. Try `tooler list` to see installed tools.",
+                    tool_id
+                );
+                std::process::exit(1);
+            }
         }
     }
 

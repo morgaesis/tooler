@@ -27,6 +27,9 @@ pub fn get_user_config_dir() -> Result<PathBuf> {
 }
 
 pub fn get_tooler_config_file_path() -> Result<PathBuf> {
+    if let Ok(env_path) = std::env::var("TOOLER_CONFIG_PATH") {
+        return Ok(PathBuf::from(env_path));
+    }
     let path = get_user_config_dir()?.join(CONFIG_FILE_NAME);
     tracing::debug!("Config file path: {}", path.display());
     Ok(path)
@@ -94,15 +97,18 @@ pub fn load_tool_configs() -> Result<ToolerConfig> {
 }
 
 pub fn save_tool_configs(config: &ToolerConfig) -> Result<()> {
-    let config_path = get_tooler_config_file_path()?;
-    let config_dir = config_path
+    save_tool_configs_to_path(config, &get_tooler_config_file_path()?)
+}
+
+pub fn save_tool_configs_to_path(config: &ToolerConfig, path: &std::path::Path) -> Result<()> {
+    let config_dir = path
         .parent()
         .ok_or_else(|| anyhow::anyhow!("Invalid config path"))?;
 
     fs::create_dir_all(config_dir)?;
 
     let content = serde_json::to_string_pretty(config)?;
-    fs::write(&config_path, content)?;
+    fs::write(path, content)?;
 
     Ok(())
 }
