@@ -150,7 +150,7 @@ fn find_executable_in_extracted(
     let mut candidates = Vec::new();
     let tool_name_lower = tool_name.to_lowercase();
 
-    let target_names = if os_system == "windows" {
+    let mut target_names = if os_system == "windows" {
         vec![
             format!("{}.exe", tool_name_lower),
             format!("{}.cmd", tool_name_lower),
@@ -161,13 +161,26 @@ fn find_executable_in_extracted(
         vec![tool_name_lower.clone(), format!("{}.sh", tool_name_lower)]
     };
 
+    // Add common aliases where the binary name differs from the repo/tool name
+    if tool_name_lower == "cli" || tool_name_lower == "github-cli" {
+        target_names.push("gh".to_string());
+        if os_system == "windows" {
+            target_names.push("gh.exe".to_string());
+        }
+    }
+
     for entry in WalkDir::new(extract_dir).into_iter().filter_map(|e| e.ok()) {
         let path = entry.path();
         if path.is_file() && is_executable(path, os_system) {
             let file_name = path.file_name()?.to_string_lossy().to_lowercase();
             let file_stem = path.file_stem()?.to_string_lossy().to_lowercase();
 
-            let mut score = 0i32;
+            let mut score = 10i32; // Base score for any executable file
+
+            // Bonus for files in a 'bin' directory
+            if path.components().any(|c| c.as_os_str() == "bin") {
+                score += 20;
+            }
 
             // Higher score for exact name match
             if target_names.contains(&file_name) {

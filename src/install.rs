@@ -65,7 +65,11 @@ pub async fn get_gh_release_info(
             .text()
             .await
             .unwrap_or_else(|_| "Unable to read error response".to_string());
-        return Err(anyhow!("GitHub API request failed: {} - {}", status, error_text));
+        return Err(anyhow!(
+            "GitHub API request failed: {} - {}",
+            status,
+            error_text
+        ));
     }
 
     let release: GitHubRelease = response.json().await?;

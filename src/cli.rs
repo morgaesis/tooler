@@ -23,6 +23,7 @@ pub enum Commands {
     #[command(
         allow_hyphen_values = true,
         disable_help_flag = true,
+        disable_version_flag = true,
         after_help = "Examples:\n  tooler run sst/opencode --version\n  tooler run nektos/act@v0.2.79 --help\n  tooler -v run act\n\nTo see help for this command, use 'tooler help run'."
     )]
     Run {

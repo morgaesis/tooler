@@ -94,7 +94,8 @@ async fn main() -> Result<()> {
                 } else {
                     // First find the existing tool to get the correct repo
                     let existing_tool = find_tool_executable(&config, &tool_id);
-                    let (tool_name, repo, tool_identifier) = if let Some(tool_info) = existing_tool {
+                    let (tool_name, repo, tool_identifier) = if let Some(tool_info) = existing_tool
+                    {
                         (
                             tool_info.tool_name.clone(),
                             tool_info.repo.clone(),
