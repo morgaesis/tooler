@@ -16,6 +16,12 @@ A CLI tool manager for GitHub Releases written in Rust.
 
 ## Installation
 
+### Bootstrapped
+
+```bash
+tooler pull morgaesis/tooler
+```
+
 ### Quick Install (curl-pipe)
 
 ```bash
@@ -23,14 +29,6 @@ curl -sSL https://github.com/morgaesis/tooler/releases/latest/download/install.s
 ```
 
 ### From Source
-
-```bash
-git clone https://github.com/morgaesis/tooler
-cd tooler
-cargo install --path .
-```
-
-### From Source (recommended)
 
 ```bash
 git clone https://github.com/morgaesis/tooler
@@ -50,7 +48,7 @@ tooler run nektos/act@v0.2.79 -- --help
 tooler run infisical/infisical@infisical-cli/v0.41.90 -- --help
 ```
 
-### Configuration
+### Configuration Details
 
 ```bash
 # Show all settings
@@ -83,7 +81,7 @@ tooler -q list
 tooler run act -- --help
 ```
 
-## Configuration
+## Settings
 
 Settings are stored in `~/.config/.tooler/config.json` and can be overridden with environment variables:
 
@@ -144,7 +142,9 @@ cargo run -- run nektos/act -- --help
 
 ## Migration from Python
 
-This Rust version maintains compatibility with the Python tooler configuration and data formats. Simply replace the Python installation with the Rust binary, and your existing tools and settings will continue to work.
+This Rust version maintains compatibility with the Python tooler configuration and data formats.
+Simply replace the Python installation with the Rust binary,
+and your existing tools and settings will continue to work.
 
 ## License
 
