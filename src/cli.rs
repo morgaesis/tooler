@@ -89,8 +89,9 @@ pub enum ConfigAction {
     },
     /// Set a configuration setting
     Set {
-        /// Key=Value pair (e.g., 'update_check_days=30')
-        key_value: String,
+        /// Key and value (e.g., 'update-check-days=30' or 'update-check-days 30')
+        #[arg(trailing_var_arg = true, required = true)]
+        args: Vec<String>,
     },
     /// Unset a configuration setting (removes from config file)
     Unset {

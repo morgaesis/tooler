@@ -12,8 +12,22 @@ mod tests {
             config::normalize_key("update-check-days"),
             "update_check_days"
         );
+        assert_eq!(
+            config::normalize_key("update_check_days"),
+            "update_check_days"
+        );
+        assert_eq!(
+            config::normalize_key("updateCheckDays"),
+            "update_check_days"
+        );
+        assert_eq!(
+            config::normalize_key("UpdateCheckDays"),
+            "update_check_days"
+        );
         assert_eq!(config::normalize_key("autoShim"), "auto_shim");
+        assert_eq!(config::normalize_key("auto-shim"), "auto_shim");
         assert_eq!(config::normalize_key("shim-dir"), "shim_dir");
+        assert_eq!(config::normalize_key("shim_dir"), "shim_dir");
     }
 
     #[test]

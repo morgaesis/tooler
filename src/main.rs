@@ -226,7 +226,8 @@ async fn main() -> Result<()> {
         Commands::Config { action } => match action {
             ConfigAction::Get { key } => {
                 if let Some(key) = key {
-                    let value = match key.as_str() {
+                    let normalized_key = normalize_key(&key);
+                    let value = match normalized_key.as_str() {
                         "update_check_days" => config.settings.update_check_days.to_string(),
                         "auto_shim" => config.settings.auto_shim.to_string(),
                         "shim_dir" => config.settings.shim_dir.clone(),
@@ -237,46 +238,56 @@ async fn main() -> Result<()> {
                     println!("--- Tooler Settings ---");
                     for (k, v) in &[
                         (
-                            "update_check_days",
+                            "update-check-days",
                             &config.settings.update_check_days.to_string(),
                         ),
-                        ("auto_shim", &config.settings.auto_shim.to_string()),
-                        ("shim_dir", &config.settings.shim_dir),
+                        ("auto-shim", &config.settings.auto_shim.to_string()),
+                        ("shim-dir", &config.settings.shim_dir),
                     ] {
                         println!("  {}: {}", k, v);
                     }
                 }
             }
-            ConfigAction::Set { key_value } => {
-                if let Some((key, value_str)) = key_value.split_once('=') {
-                    let key = normalize_key(key);
-                    match key.as_str() {
-                        "update_check_days" => {
-                            if let Ok(days) = value_str.parse::<i32>() {
-                                config.settings.update_check_days = days;
-                                save_tool_configs(&config)?;
-                                tracing::info!("Setting '{}' updated to '{}'", key, days);
-                            } else {
-                                tracing::error!("Invalid value for '{}'", key);
-                            }
-                        }
-                        "auto_shim" => {
-                            let value = value_str.to_lowercase() == "true" || value_str == "1";
-                            config.settings.auto_shim = value;
+            ConfigAction::Set { args } => {
+                let (key, value_str) = if args.len() == 1 {
+                    if let Some((k, v)) = args[0].split_once('=') {
+                        (k.to_string(), v.to_string())
+                    } else {
+                        tracing::error!("Invalid format. Use 'key=value' or 'key value'.");
+                        std::process::exit(1);
+                    }
+                } else if args.len() >= 2 {
+                    (args[0].clone(), args[1..].join(" "))
+                } else {
+                    tracing::error!("Invalid format. Use 'key=value' or 'key value'.");
+                    std::process::exit(1);
+                };
+
+                let normalized_key = normalize_key(&key);
+                match normalized_key.as_str() {
+                    "update_check_days" => {
+                        if let Ok(days) = value_str.parse::<i32>() {
+                            config.settings.update_check_days = days;
                             save_tool_configs(&config)?;
-                            tracing::info!("Setting '{}' updated to '{}'", key, value);
-                        }
-                        "shim_dir" => {
-                            config.settings.shim_dir = value_str.to_string();
-                            save_tool_configs(&config)?;
-                            tracing::info!("Setting '{}' updated to '{}'", key, value_str);
-                        }
-                        _ => {
-                            tracing::error!("'{}' is not a valid configuration setting. Valid settings: update_check_days, auto_shim, shim_dir", key);
+                            tracing::info!("Setting '{}' updated to '{}'", normalized_key, days);
+                        } else {
+                            tracing::error!("Invalid value for '{}'", key);
                         }
                     }
-                } else {
-                    tracing::error!("Invalid format. Use 'key=value'.");
+                    "auto_shim" => {
+                        let value = value_str.to_lowercase() == "true" || value_str == "1";
+                        config.settings.auto_shim = value;
+                        save_tool_configs(&config)?;
+                        tracing::info!("Setting '{}' updated to '{}'", normalized_key, value);
+                    }
+                    "shim_dir" => {
+                        config.settings.shim_dir = value_str.to_string();
+                        save_tool_configs(&config)?;
+                        tracing::info!("Setting '{}' updated to '{}'", normalized_key, value_str);
+                    }
+                    _ => {
+                        tracing::error!("'{}' is not a valid configuration setting. Valid settings: update-check-days, auto-shim, shim-dir", key);
+                    }
                 }
             }
             ConfigAction::Unset { key } => {

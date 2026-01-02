@@ -114,15 +114,25 @@ pub fn save_tool_configs_to_path(config: &ToolerConfig, path: &std::path::Path) 
 }
 
 pub fn normalize_key(key: &str) -> String {
-    key.replace('-', "_")
-        .chars()
-        .map(|c| {
-            if c.is_ascii_uppercase() {
-                format!("_{}", c.to_lowercase())
-            } else {
-                c.to_string()
+    let mut result = String::with_capacity(key.len());
+    let mut last_was_separator = true;
+
+    for c in key.chars() {
+        if c == '-' || c == '_' {
+            if !last_was_separator {
+                result.push('_');
+                last_was_separator = true;
             }
-        })
-        .collect::<String>()
-        .to_lowercase()
+        } else if c.is_ascii_uppercase() {
+            if !last_was_separator {
+                result.push('_');
+            }
+            result.push(c.to_ascii_lowercase());
+            last_was_separator = false;
+        } else {
+            result.push(c);
+            last_was_separator = false;
+        }
+    }
+    result
 }
