@@ -1,12 +1,27 @@
 name: Release
+
 on:
   push:
     tags:
       - "v*.*.*"
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      - name: Run tests
+        run: cargo test
+
   build:
     name: Build ${{ matrix.target }}
+    needs: test
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -19,6 +34,7 @@ jobs:
             os: ubuntu-latest
             artifact_name: tooler
             asset_name: tooler-${{ github.ref_name }}-aarch64-unknown-linux-gnu.tar.gz
+            use_cross: true
           - target: x86_64-apple-darwin
             os: macos-latest
             artifact_name: tooler
@@ -40,12 +56,25 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Build binary
+      - name: Install Cross
+        if: matrix.use_cross
+        run: cargo install cross --git https://github.com/cross-rs/cross.git
+
+      - name: Build binary (Native)
+        if: "!matrix.use_cross"
         run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build binary (Cross)
+        if: matrix.use_cross
+        run: cross build --release --target ${{ matrix.target }}
 
       - name: Strip binary (Unix)
         if: runner.os != 'Windows'
-        run: strip target/${{ matrix.target }}/release/${{ matrix.artifact_name }}
+        run: |
+          BINARY_PATH="target/${{ matrix.target }}/release/${{ matrix.artifact_name }}"
+          # For cross-compiled binaries, we use the host's strip if compatible or skip
+          # Actually, cross usually provides its own toolchain, but we can try host strip for now
+          strip "$BINARY_PATH" || true
 
       - name: Create archive (Unix)
         if: runner.os != 'Windows'
@@ -70,7 +99,7 @@ jobs:
           path: dist/${{ matrix.asset_name }}
 
   release:
-    name: Create Release
+    name: Create GitHub Release
     needs: build
     runs-on: ubuntu-latest
     permissions:
