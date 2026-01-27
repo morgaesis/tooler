@@ -7,6 +7,7 @@ use std::path::PathBuf;
 pub const APP_NAME: &str = "tooler";
 pub const CONFIG_DIR_NAME: &str = "tooler";
 pub const TOOLS_DIR_NAME: &str = "tools";
+pub const SHIMS_DIR_NAME: &str = "shims";
 pub const CONFIG_FILE_NAME: &str = "config.json";
 
 pub fn get_user_data_dir() -> Result<PathBuf> {
@@ -42,6 +43,13 @@ pub fn get_tooler_tools_dir() -> Result<PathBuf> {
     Ok(path)
 }
 
+pub fn get_tooler_shims_dir() -> Result<PathBuf> {
+    let path = get_user_data_dir()?.join(SHIMS_DIR_NAME);
+    tracing::debug!("Shims directory: {}", path.display());
+    fs::create_dir_all(&path)?;
+    Ok(path)
+}
+
 pub fn load_tool_configs() -> Result<ToolerConfig> {
     let config_path = get_tooler_config_file_path()?;
 
@@ -69,6 +77,7 @@ pub fn load_tool_configs() -> Result<ToolerConfig> {
                         default_config.settings.shim_dir = partial_config.settings.shim_dir;
                     }
                     default_config.settings.auto_shim = partial_config.settings.auto_shim;
+                    default_config.settings.auto_update = partial_config.settings.auto_update;
                 }
                 default_config
             } else {
@@ -87,6 +96,10 @@ pub fn load_tool_configs() -> Result<ToolerConfig> {
 
     if let Ok(auto_shim) = std::env::var("TOOLER_AUTO_SHIM") {
         config.settings.auto_shim = auto_shim.to_lowercase() == "true" || auto_shim == "1";
+    }
+
+    if let Ok(auto_update) = std::env::var("TOOLER_AUTO_UPDATE") {
+        config.settings.auto_update = auto_update.to_lowercase() == "true" || auto_update == "1";
     }
 
     if let Ok(shim_dir) = std::env::var("TOOLER_SHIM_DIR") {

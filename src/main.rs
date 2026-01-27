@@ -11,7 +11,7 @@ use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use clap::{CommandFactory, Parser};
 use cli::{Cli, Commands, ConfigAction};
-use config::{load_tool_configs, normalize_key, save_tool_configs};
+use config::{get_tooler_shims_dir, load_tool_configs, normalize_key, save_tool_configs};
 use install::{find_tool_executable, install_or_update_tool, pin_tool, remove_tool};
 use std::env;
 use std::fs;
@@ -202,6 +202,12 @@ async fn main() -> Result<()> {
                         api_version,
                         path.display()
                     );
+                    // Create shim if auto_shim is enabled
+                    if config.settings.auto_shim && !cfg!(windows) {
+                        let shim_dir = get_tooler_shims_dir()?.to_string_lossy().to_string();
+                        create_shim_script(&shim_dir)?;
+                        create_tool_symlink(&shim_dir, &tool_identifier.tool_name())?;
+                    }
                 }
                 Err(e) => {
                     tracing::error!("Failed to install tool '{}': {}", tool_id, e);
@@ -242,6 +248,7 @@ async fn main() -> Result<()> {
                             &config.settings.update_check_days.to_string(),
                         ),
                         ("auto-shim", &config.settings.auto_shim.to_string()),
+                        ("auto-update", &config.settings.auto_update.to_string()),
                         ("shim-dir", &config.settings.shim_dir),
                     ] {
                         println!("  {}: {}", k, v);
@@ -280,13 +287,19 @@ async fn main() -> Result<()> {
                         save_tool_configs(&config)?;
                         tracing::info!("Setting '{}' updated to '{}'", normalized_key, value);
                     }
+                    "auto_update" => {
+                        let value = value_str.to_lowercase() == "true" || value_str == "1";
+                        config.settings.auto_update = value;
+                        save_tool_configs(&config)?;
+                        tracing::info!("Setting '{}' updated to '{}'", normalized_key, value);
+                    }
                     "shim_dir" => {
                         config.settings.shim_dir = value_str.to_string();
                         save_tool_configs(&config)?;
                         tracing::info!("Setting '{}' updated to '{}'", normalized_key, value_str);
                     }
                     _ => {
-                        tracing::error!("'{}' is not a valid configuration setting. Valid settings: update-check-days, auto-shim, shim-dir", key);
+                        tracing::error!("'{}' is not a valid configuration setting. Valid settings: update-check-days, auto-shim, auto-update, shim-dir", key);
                     }
                 }
             }
@@ -304,13 +317,35 @@ async fn main() -> Result<()> {
                         save_tool_configs(&config)?;
                         tracing::info!("Setting '{}' unset", key);
                     }
+                    "auto_update" => {
+                        config.settings.auto_update = ToolerSettings::default().auto_update;
+                        save_tool_configs(&config)?;
+                        tracing::info!("Setting '{}' unset", key);
+                    }
                     "shim_dir" => {
                         config.settings.shim_dir = ToolerSettings::default().shim_dir;
                         save_tool_configs(&config)?;
                         tracing::info!("Setting '{}' unset", key);
                     }
                     _ => {
-                        tracing::error!("'{}' is not a valid configuration setting. Valid settings: update_check_days, auto_shim, shim_dir", key);
+                        tracing::error!("'{}' is not a valid configuration setting. Valid settings: update_check_days, auto_shim, auto_update, shim_dir", key);
+                    }
+                }
+            }
+            ConfigAction::Show { format } => {
+                if format == "json" {
+                    let json = serde_json::to_string_pretty(&config)?;
+                    println!("{}", json);
+                } else {
+                    println!("--- Tooler Configuration ---");
+                    println!("Settings:");
+                    println!("  update-check-days: {}", config.settings.update_check_days);
+                    println!("  auto-shim: {}", config.settings.auto_shim);
+                    println!("  auto-update: {}", config.settings.auto_update);
+                    println!("  shim-dir: {}", config.settings.shim_dir);
+                    println!("\nTools: {}", config.tools.len());
+                    for (key, info) in &config.tools {
+                        println!("  - {}: v{} ({})", key, info.version, info.repo);
                     }
                 }
             }
@@ -450,8 +485,9 @@ async fn main() -> Result<()> {
                 }
                 // Create shim if auto_shim is enabled
                 if config.settings.auto_shim && !cfg!(windows) {
-                    create_shim_script(&config.settings.shim_dir)?;
-                    create_tool_symlink(&config.settings.shim_dir, &tool_identifier.tool_name())?;
+                    let shim_dir = get_tooler_shims_dir()?.to_string_lossy().to_string();
+                    create_shim_script(&shim_dir)?;
+                    create_tool_symlink(&shim_dir, &tool_identifier.tool_name())?;
                 }
                 // Update last accessed time
                 let key = tool_identifier.config_key();
@@ -516,7 +552,15 @@ fn setup_logging(cli: &Cli) -> Result<()> {
         "debug"
     };
 
-    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(level));
+    // Support LOG_LEVEL and TOOLER_LOG_LEVEL
+    let filter = EnvFilter::try_from_default_env()
+        .or_else(|_| {
+            let env_val = std::env::var("TOOLER_LOG_LEVEL")
+                .or_else(|_| std::env::var("LOG_LEVEL"))
+                .unwrap_or_else(|_| level.to_string());
+            EnvFilter::try_new(env_val)
+        })
+        .unwrap_or_else(|_| EnvFilter::new(level));
 
     fmt()
         .with_env_filter(filter)
@@ -529,6 +573,7 @@ fn setup_logging(cli: &Cli) -> Result<()> {
 }
 
 fn list_installed_tools(config: &types::ToolerConfig) {
+    use console::style;
     println!("--- Installed Tooler Tools ---");
     if config.tools.is_empty() {
         println!("  No tools installed yet.");
@@ -538,10 +583,68 @@ fn list_installed_tools(config: &types::ToolerConfig) {
     let mut tools: Vec<_> = config.tools.values().collect();
     tools.sort_by_key(|t| &t.repo);
 
+    let now = Utc::now();
+
     for info in tools {
+        let pin_status = if info.pinned { "📌 " } else { "" };
+        let install_type_emoji = match info.install_type.as_str() {
+            "archive" => "📦",
+            "binary" => "🚀",
+            "python-venv" => "🐍",
+            _ => "🛠️",
+        };
+
+        // Extract architecture from path if possible
+        let arch = if info.executable_path.contains("__") {
+            info.executable_path
+                .split("__")
+                .nth(2)
+                .and_then(|s| s.split('/').next())
+                .unwrap_or("unknown")
+        } else {
+            "unknown"
+        };
+
+        // Calculate age and eligibility
+        let (age_str, is_eligible) = match info.installed_at.parse::<DateTime<Utc>>() {
+            Ok(installed_at) => {
+                let duration = now - installed_at;
+                let days = duration.num_days();
+                let s = if days > 0 {
+                    format!("{}d", days)
+                } else if duration.num_hours() > 0 {
+                    format!("{}h", duration.num_hours())
+                } else {
+                    format!("{}m", duration.num_minutes())
+                };
+                let eligible = days >= config.settings.update_check_days as i64;
+                (s, eligible)
+            }
+            Err(_) => ("unknown".to_string(), false),
+        };
+
+        let age_colored = if is_eligible {
+            style(&age_str).red().bold()
+        } else {
+            style(&age_str).green()
+        };
+
+        let update_note = if is_eligible && !info.pinned {
+            format!(" {}", style("(! stale)").yellow().italic())
+        } else {
+            "".to_string()
+        };
+
         println!(
-            "  - {} (v{}) [type: {}]",
-            info.repo, info.version, info.install_type
+            "  - {} ({}) {}{}[{} | {} | {}]{}",
+            info.repo,
+            info.version,
+            pin_status,
+            install_type_emoji,
+            info.install_type,
+            arch,
+            age_colored,
+            update_note
         );
         println!("    Path:    {}\n", info.executable_path);
     }
@@ -560,76 +663,73 @@ async fn check_for_updates(config: &mut types::ToolerConfig) -> Result<()> {
     let now = Utc::now();
     let mut updates_found = Vec::new();
     let mut keys_to_update = Vec::new();
+    let mut tools_to_auto_update = Vec::new();
 
-    // Only check for updates on unpinned tools (those without specific versions)
-    let unpinned_tools: Vec<_> = config
+    // 1. Identify tools that need checking
+    let stale_tools: Vec<(String, String, String, String)> = config
         .tools
         .iter()
-        .filter(|(_key, info)| {
-            // Check if this looks like an unpinned tool (version contains "latest")
-            info.version == "latest" || info.version.to_lowercase().contains("latest")
+        .filter_map(|(key, info)| {
+            if !info.version.to_lowercase().contains("latest") && info.version != "latest" {
+                return None;
+            }
+            if let Ok(last_accessed) = info.last_accessed.parse::<DateTime<Utc>>() {
+                let days_since_update = (now - last_accessed).num_days();
+                if days_since_update > config.settings.update_check_days as i64 {
+                    return Some((
+                        key.clone(),
+                        info.tool_name.clone(),
+                        info.repo.clone(),
+                        info.version.clone(),
+                    ));
+                }
+            }
+            None
         })
         .collect();
 
-    if unpinned_tools.is_empty() {
-        tracing::info!(
-            "No unpinned tools found to check for updates. (All tools are version-pinned)"
-        );
+    if stale_tools.is_empty() {
+        tracing::info!("No stale unpinned tools found to check for updates.");
         return Ok(());
     }
 
-    for (key, info) in unpinned_tools {
-        match info.last_accessed.parse::<DateTime<Utc>>() {
-            Ok(last_accessed) => {
-                let days_since_update = (now - last_accessed).num_days();
+    // 2. Check for updates on GitHub (does not borrow config)
+    for (key, name, repo, version) in stale_tools {
+        tracing::info!("Checking for update for {} (current: {})...", repo, version);
 
-                if days_since_update > config.settings.update_check_days as i64 {
-                    tracing::info!(
-                        "Checking for update for {} (current: {}, last updated: {} days ago)",
-                        info.repo,
-                        info.version,
-                        days_since_update
-                    );
+        if let Ok(release) = install::get_gh_release_info(&repo, Some("latest")).await {
+            let current_clean = version.trim_start_matches('v');
+            let latest_clean = release.tag_name.trim_start_matches('v');
 
-                    if let Ok(release) =
-                        install::get_gh_release_info(&info.repo, Some("latest")).await
-                    {
-                        // Strip 'v' prefix for comparison
-                        let current_clean = info.version.trim_start_matches('v');
-                        let latest_clean = release.tag_name.trim_start_matches('v');
-
-                        if latest_clean != current_clean {
-                            updates_found.push(format!(
-                                "Tool {} ({}) has update: {} -> {} (last updated {} days ago)",
-                                info.tool_name,
-                                info.repo,
-                                info.version,
-                                release.tag_name,
-                                days_since_update
-                            ));
-                        }
-
-                        // Mark key for update to avoid borrowing issues
-                        keys_to_update.push(key.clone());
-                    } else {
-                        tracing::warn!(
-                            "Could not get latest release for {} during update check",
-                            info.repo
-                        );
-                    }
+            if latest_clean != current_clean {
+                if config.settings.auto_update {
+                    tools_to_auto_update.push((name, repo.clone(), release.tag_name));
+                } else {
+                    updates_found.push(format!(
+                        "Tool {} ({}) has update: {} -> {}",
+                        name, repo, version, release.tag_name
+                    ));
                 }
             }
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to parse timestamp for {}, skipping update check: {}",
-                    info.repo,
-                    e
-                );
-            }
+            keys_to_update.push(key);
+        } else {
+            tracing::warn!(
+                "Could not get latest release for {} during update check",
+                repo
+            );
         }
     }
 
-    // Update last_accessed timestamps for all checked tools
+    // 3. Perform auto-updates (mutably borrows config)
+    for (name, repo, version) in tools_to_auto_update {
+        tracing::info!("Auto-updating {} to {}...", repo, version);
+        match install_or_update_tool(config, &name, &repo, Some(&version), true, None).await {
+            Ok(_) => tracing::info!("{} auto-updated successfully", repo),
+            Err(e) => tracing::error!("Failed to auto-update {}: {}", repo, e),
+        }
+    }
+
+    // 4. Update last_accessed timestamps for all checked tools
     for key in keys_to_update {
         if let Some(tool_info) = config.tools.get_mut(&key) {
             tool_info.last_accessed = now.to_rfc3339();
@@ -644,8 +744,6 @@ async fn check_for_updates(config: &mut types::ToolerConfig) -> Result<()> {
         }
         eprintln!("To update, run `tooler update [repo/tool]` or `tooler update all`.");
         eprintln!("----------------------------\n");
-    } else {
-        tracing::info!("No updates found for unpinned tools.");
     }
 
     Ok(())

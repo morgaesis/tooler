@@ -21,22 +21,43 @@ fn default_pinned() -> bool {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolerSettings {
+    #[serde(default = "default_update_check_days")]
     pub update_check_days: i32,
+    #[serde(default = "default_auto_shim")]
     pub auto_shim: bool,
+    #[serde(default = "default_auto_update")]
+    pub auto_update: bool,
+    #[serde(default = "default_shim_dir")]
     pub shim_dir: String,
+}
+
+fn default_update_check_days() -> i32 {
+    60
+}
+fn default_auto_shim() -> bool {
+    true
+}
+fn default_auto_update() -> bool {
+    true
+}
+fn default_shim_dir() -> String {
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".local")
+        .join("share")
+        .join("tooler")
+        .join("shims")
+        .to_string_lossy()
+        .to_string()
 }
 
 impl Default for ToolerSettings {
     fn default() -> Self {
         Self {
-            update_check_days: 60,
-            auto_shim: false,
-            shim_dir: dirs::home_dir()
-                .unwrap_or_else(|| std::path::PathBuf::from("."))
-                .join(".local")
-                .join("bin")
-                .to_string_lossy()
-                .to_string(),
+            update_check_days: default_update_check_days(),
+            auto_shim: default_auto_shim(),
+            auto_update: default_auto_update(),
+            shim_dir: default_shim_dir(),
         }
     }
 }

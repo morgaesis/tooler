@@ -210,3 +210,8 @@ __marimo__/
 # Added by cargo
 
 /target
+
+
+ACTIONLOG.md
+REVIEW.md
+AGENTS.md

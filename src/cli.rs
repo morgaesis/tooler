@@ -98,4 +98,10 @@ pub enum ConfigAction {
         /// Key to unset (e.g., 'shim-dir')
         key: String,
     },
+    /// Show full configuration
+    Show {
+        /// Output format (json, yaml, plain)
+        #[arg(long, default_value = "json")]
+        format: String,
+    },
 }
