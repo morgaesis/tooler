@@ -51,6 +51,9 @@ tooler run infisical/infisical@infisical-cli/v0.41.90 -- --help
 ### Configuration Details
 
 ```bash
+# Show full configuration (JSON or plain)
+tooler config show --format plain
+
 # Show all settings
 tooler config get
 
@@ -59,11 +62,21 @@ tooler config get update-check-days
 
 # Set a setting (both formats supported)
 tooler config set auto-shim=true
-tooler config set shim-dir /home/user/.local/bin
+tooler config set auto-update=true
 
 # Unset a setting (revert to default)
-tooler config unset shim-dir
+tooler config unset auto-shim
 ```
+
+### Shim Management
+
+Tooler automatically creates shims for your tools in a managed directory. To use these shims, add the following to your shell profile (`.bashrc`, `.zshrc`, etc.):
+
+```bash
+export PATH="$HOME/.local/share/tooler/shims:$PATH"
+```
+
+This ensures your tools are available directly in your terminal while keeping your `~/.local/bin` clean.
 
 ### Advanced Usage
 
@@ -83,11 +96,14 @@ tooler run act -- --help
 
 ## Settings
 
-Settings are stored in `~/.config/.tooler/config.json` and can be overridden with environment variables:
+Settings are stored in `~/.config/tooler/config.json` and can be overridden with environment variables:
 
 - `update-check-days`: Days between update checks (default: 60, env: `TOOLER_UPDATE_CHECK_DAYS`)
-- `auto-shim`: Create command-line shims (default: false, env: `TOOLER_AUTO_SHIM`)
-- `shim-dir`: Directory for shims (default: `~/.local/bin`, env: `TOOLER_SHIM_DIR`)
+- `auto-shim`: Create command-line shims (default: true, env: `TOOLER_AUTO_SHIM`)
+- `auto-update`: Automatically update tools on run (default: true, env: `TOOLER_AUTO_UPDATE`)
+- `shim-dir`: Directory for shims (default: `~/.local/share/tooler/shims`, env: `TOOLER_SHIM_DIR`)
+
+Logging can be controlled via `LOG_LEVEL`, `TOOLER_LOG_LEVEL`, or `RUST_LOG`.
 
 ## Architecture Support
 
