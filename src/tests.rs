@@ -26,8 +26,8 @@ mod tests {
         );
         assert_eq!(config::normalize_key("autoShim"), "auto_shim");
         assert_eq!(config::normalize_key("auto-shim"), "auto_shim");
-        assert_eq!(config::normalize_key("shim-dir"), "shim_dir");
-        assert_eq!(config::normalize_key("shim_dir"), "shim_dir");
+        assert_eq!(config::normalize_key("bin-dir"), "bin_dir");
+        assert_eq!(config::normalize_key("bin_dir"), "bin_dir");
     }
 
     #[test]
@@ -43,7 +43,7 @@ mod tests {
         assert!(config.tools.is_empty());
         assert_eq!(config.settings.update_check_days, 60);
         assert!(config.settings.auto_shim);
-        assert!(config.settings.shim_dir.contains(".local"));
+        assert!(config.settings.bin_dir.contains(".local"));
     }
 
     // ToolIdentifier parsing tests

@@ -11,7 +11,7 @@ use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use clap::{CommandFactory, Parser};
 use cli::{Cli, Commands, ConfigAction};
-use config::{get_tooler_shims_dir, load_tool_configs, normalize_key, save_tool_configs};
+use config::{load_tool_configs, normalize_key, save_tool_configs};
 use install::{find_tool_executable, install_or_update_tool, pin_tool, remove_tool};
 use std::env;
 use std::fs;
@@ -204,9 +204,9 @@ async fn main() -> Result<()> {
                     );
                     // Create shim if auto_shim is enabled
                     if config.settings.auto_shim && !cfg!(windows) {
-                        let shim_dir = get_tooler_shims_dir()?.to_string_lossy().to_string();
-                        create_shim_script(&shim_dir)?;
-                        create_tool_symlink(&shim_dir, &tool_identifier.tool_name())?;
+                        let bin_dir = &config.settings.bin_dir;
+                        create_shim_script(bin_dir)?;
+                        create_tool_symlink(bin_dir, &tool_identifier.tool_name())?;
                     }
                 }
                 Err(e) => {
@@ -236,7 +236,7 @@ async fn main() -> Result<()> {
                     let value = match normalized_key.as_str() {
                         "update_check_days" => config.settings.update_check_days.to_string(),
                         "auto_shim" => config.settings.auto_shim.to_string(),
-                        "shim_dir" => config.settings.shim_dir.clone(),
+                        "bin_dir" => config.settings.bin_dir.clone(),
                         _ => format!("Setting '{}' not found", key),
                     };
                     println!("{}", value);
@@ -249,7 +249,7 @@ async fn main() -> Result<()> {
                         ),
                         ("auto-shim", &config.settings.auto_shim.to_string()),
                         ("auto-update", &config.settings.auto_update.to_string()),
-                        ("shim-dir", &config.settings.shim_dir),
+                        ("bin-dir", &config.settings.bin_dir),
                     ] {
                         println!("  {}: {}", k, v);
                     }
@@ -293,13 +293,13 @@ async fn main() -> Result<()> {
                         save_tool_configs(&config)?;
                         tracing::info!("Setting '{}' updated to '{}'", normalized_key, value);
                     }
-                    "shim_dir" => {
-                        config.settings.shim_dir = value_str.to_string();
+                    "bin_dir" => {
+                        config.settings.bin_dir = value_str.to_string();
                         save_tool_configs(&config)?;
                         tracing::info!("Setting '{}' updated to '{}'", normalized_key, value_str);
                     }
                     _ => {
-                        tracing::error!("'{}' is not a valid configuration setting. Valid settings: update-check-days, auto-shim, auto-update, shim-dir", key);
+                        tracing::error!("'{}' is not a valid configuration setting. Valid settings: update-check-days, auto-shim, auto-update, bin-dir", key);
                     }
                 }
             }
@@ -322,13 +322,13 @@ async fn main() -> Result<()> {
                         save_tool_configs(&config)?;
                         tracing::info!("Setting '{}' unset", key);
                     }
-                    "shim_dir" => {
-                        config.settings.shim_dir = ToolerSettings::default().shim_dir;
+                    "bin_dir" => {
+                        config.settings.bin_dir = ToolerSettings::default().bin_dir;
                         save_tool_configs(&config)?;
                         tracing::info!("Setting '{}' unset", key);
                     }
                     _ => {
-                        tracing::error!("'{}' is not a valid configuration setting. Valid settings: update_check_days, auto_shim, auto_update, shim_dir", key);
+                        tracing::error!("'{}' is not a valid configuration setting. Valid settings: update_check_days, auto_shim, auto_update, bin_dir", key);
                     }
                 }
             }
@@ -336,13 +336,16 @@ async fn main() -> Result<()> {
                 if format == "json" {
                     let json = serde_json::to_string_pretty(&config)?;
                     println!("{}", json);
+                } else if format == "yaml" {
+                    let yaml = serde_yaml::to_string(&config)?;
+                    println!("{}", yaml);
                 } else {
                     println!("--- Tooler Configuration ---");
                     println!("Settings:");
                     println!("  update-check-days: {}", config.settings.update_check_days);
                     println!("  auto-shim: {}", config.settings.auto_shim);
                     println!("  auto-update: {}", config.settings.auto_update);
-                    println!("  shim-dir: {}", config.settings.shim_dir);
+                    println!("  bin-dir: {}", config.settings.bin_dir);
                     println!("\nTools: {}", config.tools.len());
                     for (key, info) in &config.tools {
                         println!("  - {}: v{} ({})", key, info.version, info.repo);
@@ -483,11 +486,11 @@ async fn main() -> Result<()> {
                         tracing::info!("{} age: unknown", info.repo);
                     }
                 }
-                // Create shim if auto_shim is enabled
+                    // Create shim if auto_shim is enabled
                 if config.settings.auto_shim && !cfg!(windows) {
-                    let shim_dir = get_tooler_shims_dir()?.to_string_lossy().to_string();
-                    create_shim_script(&shim_dir)?;
-                    create_tool_symlink(&shim_dir, &tool_identifier.tool_name())?;
+                    let bin_dir = &config.settings.bin_dir;
+                    create_shim_script(bin_dir)?;
+                    create_tool_symlink(bin_dir, &tool_identifier.tool_name())?;
                 }
                 // Update last accessed time
                 let key = tool_identifier.config_key();
@@ -665,12 +668,12 @@ async fn check_for_updates(config: &mut types::ToolerConfig) -> Result<()> {
     let mut keys_to_update = Vec::new();
     let mut tools_to_auto_update = Vec::new();
 
-    // 1. Identify tools that need checking
+    // 1. Identify tools that need checking (all unpinned tools)
     let stale_tools: Vec<(String, String, String, String)> = config
         .tools
         .iter()
         .filter_map(|(key, info)| {
-            if !info.version.to_lowercase().contains("latest") && info.version != "latest" {
+            if info.pinned {
                 return None;
             }
             if let Ok(last_accessed) = info.last_accessed.parse::<DateTime<Utc>>() {
@@ -749,10 +752,10 @@ async fn check_for_updates(config: &mut types::ToolerConfig) -> Result<()> {
     Ok(())
 }
 
-fn create_shim_script(shim_dir: &str) -> Result<()> {
-    let shim_path = Path::new(shim_dir).join("tooler-shim");
+fn create_shim_script(bin_dir: &str) -> Result<()> {
+    let shim_path = Path::new(bin_dir).join("tooler-shim");
     if !shim_path.exists() {
-        fs::create_dir_all(shim_dir)?;
+        fs::create_dir_all(bin_dir)?;
         let shim_content =
             "#!/bin/bash\ntool_name=$(basename \"$0\")\nexec tooler run \"$tool_name\" \"$@\"\n";
         fs::write(&shim_path, shim_content)?;
@@ -792,9 +795,9 @@ fn create_shim_script(shim_dir: &str) -> Result<()> {
     Ok(())
 }
 
-fn create_tool_symlink(shim_dir: &str, tool_name: &str) -> Result<()> {
-    let shim_path = Path::new(shim_dir).join("tooler-shim");
-    let symlink_path = Path::new(shim_dir).join(tool_name);
+fn create_tool_symlink(bin_dir: &str, tool_name: &str) -> Result<()> {
+    let shim_path = Path::new(bin_dir).join("tooler-shim");
+    let symlink_path = Path::new(bin_dir).join(tool_name);
 
     // Don't create symlink for tooler-shim itself
     if tool_name == "tooler-shim" {

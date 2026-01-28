@@ -95,7 +95,7 @@ pub enum ConfigAction {
     },
     /// Unset a configuration setting (removes from config file)
     Unset {
-        /// Key to unset (e.g., 'shim-dir')
+        /// Key to unset (e.g., 'bin-dir')
         key: String,
     },
     /// Show full configuration
