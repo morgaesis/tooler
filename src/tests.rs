@@ -42,7 +42,7 @@ mod tests {
         let config = ToolerConfig::default();
         assert!(config.tools.is_empty());
         assert_eq!(config.settings.update_check_days, 60);
-        assert!(!config.settings.auto_shim);
+        assert!(config.settings.auto_shim);
         assert!(config.settings.shim_dir.contains(".local"));
     }
 

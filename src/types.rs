@@ -35,7 +35,7 @@ fn default_update_check_days() -> i32 {
     60
 }
 fn default_auto_shim() -> bool {
-    false
+    true
 }
 fn default_auto_update() -> bool {
     true
