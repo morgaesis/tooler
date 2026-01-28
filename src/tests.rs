@@ -380,4 +380,58 @@ mod tests {
         assert_eq!(deserialized_old.tool_name, "test");
         assert!(!deserialized_old.pinned); // Should default to false
     }
+
+    #[test]
+    fn test_minikube_arm_matching() {
+        use crate::platform::find_asset_for_platform;
+        use crate::types::GitHubAsset;
+
+        let assets = vec![
+            GitHubAsset {
+                name: "minikube-linux-amd64".to_string(),
+                browser_download_url: "https://example.com/amd64".to_string(),
+            },
+            GitHubAsset {
+                name: "minikube-linux-arm64".to_string(),
+                browser_download_url: "https://example.com/arm64".to_string(),
+            },
+            GitHubAsset {
+                name: "minikube-linux-arm".to_string(),
+                browser_download_url: "https://example.com/arm".to_string(),
+            },
+        ];
+
+        // Test for arm64
+        let result =
+            find_asset_for_platform(&assets, "kubernetes/minikube", "linux", "arm64").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().name, "minikube-linux-arm64");
+
+        // Test for arm (32-bit)
+        // BUG: This currently returns arm64 because "arm64" contains "arm"
+        let result =
+            find_asset_for_platform(&assets, "kubernetes/minikube", "linux", "arm").unwrap();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().name, "minikube-linux-arm");
+    }
+
+    #[test]
+    fn test_arch_fallback_avoidance() {
+        use crate::platform::find_asset_for_platform;
+        use crate::types::GitHubAsset;
+
+        let assets = vec![GitHubAsset {
+            name: "tool-linux-amd64.tar.gz".to_string(),
+            browser_download_url: "https://example.com/amd64".to_string(),
+        }];
+
+        // If we are on arm64 and only amd64 is available, it should NOT automatically
+        // fall back to amd64 if it's in a different architecture group.
+        let result = find_asset_for_platform(&assets, "some/tool", "linux", "arm64").unwrap();
+
+        assert!(
+            result.is_none(),
+            "Should not fall back to amd64 when looking for arm64"
+        );
+    }
 }

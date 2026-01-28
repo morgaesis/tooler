@@ -99,9 +99,21 @@ pub fn find_asset_for_platform(
                     let os_match = os_aliases.iter().any(|(os, aliases)| {
                         os == &system_os && aliases.iter().any(|alias| name_lower.contains(alias))
                     });
+
                     let arch_match = arch_aliases.iter().any(|(arch, aliases)| {
                         arch == &system_arch
-                            && aliases.iter().any(|alias| name_lower.contains(alias))
+                            && aliases.iter().any(|alias| {
+                                if !name_lower.contains(alias) {
+                                    return false;
+                                }
+
+                                // Special handling for "arm" to avoid matching "arm64"
+                                if alias == &"arm" && name_lower.contains("arm64") {
+                                    return false;
+                                }
+
+                                true
+                            })
                     });
 
                     tracing::trace!(
@@ -152,15 +164,6 @@ pub fn find_asset_for_platform(
                         download_url: asset.browser_download_url.clone(),
                     }));
                 }
-            }
-
-            // If no exact match (matching_assets was empty), fall back to first asset in category
-            if let Some(asset) = asset_list.first() {
-                tracing::info!("Found best match (fallback): '{}'", asset.name);
-                return Ok(Some(AssetInfo {
-                    name: asset.name.clone(),
-                    download_url: asset.browser_download_url.clone(),
-                }));
             }
         }
     }
