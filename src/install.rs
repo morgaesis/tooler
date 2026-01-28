@@ -164,6 +164,7 @@ pub async fn install_or_update_tool(
         }
     }
 
+    eprintln!("Installing/Updating {} {}...", tool_name, actual_version);
     tracing::info!("Installing/Updating {} {}...", tool_name, actual_version);
  
     // Find suitable asset

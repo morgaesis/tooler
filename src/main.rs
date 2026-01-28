@@ -724,6 +724,9 @@ async fn check_for_updates(config: &mut types::ToolerConfig) -> Result<()> {
     }
 
     // 3. Perform auto-updates (mutably borrows config)
+    if !tools_to_auto_update.is_empty() {
+        eprintln!("Auto-updating {} stale tools...", tools_to_auto_update.len());
+    }
     for (name, repo, version) in tools_to_auto_update {
         tracing::info!("Auto-updating {} to {}...", repo, version);
         match install_or_update_tool(config, &name, &repo, Some(&version), true, None).await {

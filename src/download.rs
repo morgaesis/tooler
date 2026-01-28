@@ -17,13 +17,15 @@ pub async fn download_file(url: &str, local_path: &Path) -> Result<()> {
     let response = reqwest::get(url).await?;
     let total_size = response.content_length().unwrap_or(0);
 
+    let filename = local_path.file_name().unwrap().to_string_lossy().to_string();
     let pb = ProgressBar::new(total_size);
     pb.set_style(
         ProgressStyle::default_bar()
-            .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
+            .template("{msg} {spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})")
             .unwrap()
             .progress_chars("#>-")
     );
+    pb.set_message(format!("Downloading {}", filename));
 
     let mut file = fs::File::create(local_path)?;
     let mut downloaded = 0u64;
