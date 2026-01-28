@@ -7,7 +7,6 @@ use std::path::PathBuf;
 pub const APP_NAME: &str = "tooler";
 pub const CONFIG_DIR_NAME: &str = "tooler";
 pub const TOOLS_DIR_NAME: &str = "tools";
-pub const SHIMS_DIR_NAME: &str = "shims";
 pub const CONFIG_FILE_NAME: &str = "config.json";
 
 pub fn get_user_data_dir() -> Result<PathBuf> {
@@ -28,7 +27,9 @@ pub fn get_user_config_dir() -> Result<PathBuf> {
 }
 
 pub fn get_tooler_config_file_path() -> Result<PathBuf> {
-    if let Ok(env_path) = std::env::var("TOOLER_CONFIG_PATH") {
+    if let Ok(env_path) =
+        std::env::var("TOOLER_CONFIG").or_else(|_| std::env::var("TOOLER_CONFIG_PATH"))
+    {
         return Ok(PathBuf::from(env_path));
     }
     let path = get_user_config_dir()?.join(CONFIG_FILE_NAME);
@@ -39,13 +40,6 @@ pub fn get_tooler_config_file_path() -> Result<PathBuf> {
 pub fn get_tooler_tools_dir() -> Result<PathBuf> {
     let path = get_user_data_dir()?.join(TOOLS_DIR_NAME);
     tracing::debug!("Tools directory: {}", path.display());
-    fs::create_dir_all(&path)?;
-    Ok(path)
-}
-
-pub fn get_tooler_shims_dir() -> Result<PathBuf> {
-    let path = get_user_data_dir()?.join(SHIMS_DIR_NAME);
-    tracing::debug!("Shims directory: {}", path.display());
     fs::create_dir_all(&path)?;
     Ok(path)
 }
@@ -73,8 +67,8 @@ pub fn load_tool_configs() -> Result<ToolerConfig> {
                         default_config.settings.update_check_days =
                             partial_config.settings.update_check_days;
                     }
-                    if !partial_config.settings.shim_dir.is_empty() {
-                        default_config.settings.shim_dir = partial_config.settings.shim_dir;
+                    if !partial_config.settings.bin_dir.is_empty() {
+                        default_config.settings.bin_dir = partial_config.settings.bin_dir;
                     }
                     default_config.settings.auto_shim = partial_config.settings.auto_shim;
                     default_config.settings.auto_update = partial_config.settings.auto_update;
@@ -102,8 +96,8 @@ pub fn load_tool_configs() -> Result<ToolerConfig> {
         config.settings.auto_update = auto_update.to_lowercase() == "true" || auto_update == "1";
     }
 
-    if let Ok(shim_dir) = std::env::var("TOOLER_SHIM_DIR") {
-        config.settings.shim_dir = shim_dir;
+    if let Ok(bin_dir) = std::env::var("TOOLER_BIN_DIR") {
+        config.settings.bin_dir = bin_dir;
     }
 
     Ok(config)

@@ -212,6 +212,6 @@ __marimo__/
 /target
 
 
-ACTIONLOG.md
-REVIEW.md
-AGENTS.md
+!/README.md
+!/AGENTS.md
+/*.md

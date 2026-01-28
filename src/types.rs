@@ -27,8 +27,8 @@ pub struct ToolerSettings {
     pub auto_shim: bool,
     #[serde(default = "default_auto_update")]
     pub auto_update: bool,
-    #[serde(default = "default_shim_dir")]
-    pub shim_dir: String,
+    #[serde(default = "default_bin_dir", alias = "shim_dir")]
+    pub bin_dir: String,
 }
 
 fn default_update_check_days() -> i32 {
@@ -40,13 +40,13 @@ fn default_auto_shim() -> bool {
 fn default_auto_update() -> bool {
     true
 }
-fn default_shim_dir() -> String {
+fn default_bin_dir() -> String {
     dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".local")
         .join("share")
         .join("tooler")
-        .join("shims")
+        .join("bin")
         .to_string_lossy()
         .to_string()
 }
@@ -57,7 +57,7 @@ impl Default for ToolerSettings {
             update_check_days: default_update_check_days(),
             auto_shim: default_auto_shim(),
             auto_update: default_auto_update(),
-            shim_dir: default_shim_dir(),
+            bin_dir: default_bin_dir(),
         }
     }
 }
