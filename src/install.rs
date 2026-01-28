@@ -165,7 +165,7 @@ pub async fn install_or_update_tool(
     }
 
     tracing::info!("Installing/Updating {} {}...", tool_name, actual_version);
-
+ 
     // Find suitable asset
     let asset_info = if let Some(asset_name) = asset_override {
         let asset = release_info
@@ -199,40 +199,48 @@ pub async fn install_or_update_tool(
         )
     })?;
 
-    // Clean up existing installation
-    if tool_version_dir.exists() {
-        fs::remove_dir_all(&tool_version_dir)?;
-    }
-    fs::create_dir_all(&tool_version_dir)?;
+    // Create tool install base directory if it doesn't exist
+    fs::create_dir_all(&tool_install_base_dir)?;
+ 
+    // Create temporary staging directory for atomic-like update
+    let staging_dir = TempDir::new_in(&tool_install_base_dir)?;
 
-    let executable_path = if asset_info.name.to_lowercase().ends_with(".whl") {
-        install_python_tool(&tool_version_dir, &asset_info.name, tool_name).await?
+    let staging_path = staging_dir.path();
+
+    let (executable_path, install_type) = if asset_info.name.to_lowercase().ends_with(".whl") {
+        let path = install_python_tool(staging_path, &asset_info.name, tool_name).await?;
+        (path, "python-venv".to_string())
     } else if asset_info.name.to_lowercase().ends_with(".tar.gz")
         || asset_info.name.to_lowercase().ends_with(".zip")
         || asset_info.name.to_lowercase().ends_with(".tar.xz")
         || asset_info.name.to_lowercase().ends_with(".tgz")
     {
-        let temp_dir = TempDir::new()?;
-        let temp_download_path = temp_dir.path().join(&asset_info.name);
+        let temp_download_dir = TempDir::new()?;
+        let temp_download_path = temp_download_dir.path().join(&asset_info.name);
 
         download_file(&asset_info.download_url, &temp_download_path).await?;
 
-        // Cache downloaded file
-        let cached_asset_path = tool_version_dir.join(&asset_info.name);
+        // Cache downloaded file in staging directory
+        let cached_asset_path = staging_path.join(&asset_info.name);
         fs::copy(&temp_download_path, &cached_asset_path)?;
 
-        extract_archive(
+        let path = extract_archive(
             &temp_download_path,
-            &tool_version_dir,
+            staging_path,
             tool_name,
             repo_full_name,
-        )?
+        )?;
+        (path, "archive".to_string())
     } else {
         // Direct executable
-        let temp_dir = TempDir::new()?;
-        let temp_download_path = temp_dir.path().join(&asset_info.name);
+        let temp_download_dir = TempDir::new()?;
+        let temp_download_path = temp_download_dir.path().join(&asset_info.name);
 
         download_file(&asset_info.download_url, &temp_download_path).await?;
+
+        // Cache original asset in staging directory
+        let cached_asset_path = staging_path.join(&asset_info.name);
+        fs::copy(&temp_download_path, &cached_asset_path)?;
 
         let final_binary_name = if system_info.os == "windows" {
             format!("{}.exe", tool_name)
@@ -240,7 +248,7 @@ pub async fn install_or_update_tool(
             tool_name.to_string()
         };
 
-        let move_target_path = tool_version_dir.join(final_binary_name);
+        let move_target_path = staging_path.join(final_binary_name);
         fs::rename(&temp_download_path, &move_target_path)?;
 
         // Make executable on Unix-like systems
@@ -258,27 +266,34 @@ pub async fn install_or_update_tool(
             "Installed direct executable to: {}",
             move_target_path.display()
         );
-        move_target_path
+        (move_target_path, "binary".to_string())
     };
 
-    // Update config
-    let install_type = if asset_info.name.to_lowercase().ends_with(".whl") {
-        "python-venv".to_string()
-    } else if asset_info.name.to_lowercase().ends_with(".tar.gz")
-        || asset_info.name.to_lowercase().ends_with(".zip")
-        || asset_info.name.to_lowercase().ends_with(".tar.xz")
-        || asset_info.name.to_lowercase().ends_with(".tgz")
-    {
-        "archive".to_string()
-    } else {
-        "binary".to_string()
-    };
+    // Clean up existing installation and move staging directory to final location
+    if tool_version_dir.exists() {
+        fs::remove_dir_all(&tool_version_dir)?;
+    }
+    
+    // Create the destination directory parent if it doesn't exist
+    if let Some(parent) = tool_version_dir.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    
+    // Move from staging to final version directory
+    // Note: staging_dir will be automatically cleaned up if we don't persist it,
+    // but we want to move its contents. Since fs::rename might fail across filesystems,
+    // we use it and fall back to manual move if needed, but here they should be on same FS.
+    fs::rename(&staging_path, &tool_version_dir)?;
+
+    // Update executable path to point to the final location
+    let relative_exec_path = executable_path.strip_prefix(&staging_path)?;
+    let final_executable_path = tool_version_dir.join(relative_exec_path);
 
     let tool_info = ToolInfo {
         tool_name: tool_name.to_lowercase(),
         repo: repo_full_name.to_string(),
         version: actual_version.trim_start_matches('v').to_string(),
-        executable_path: executable_path.to_string_lossy().to_string(),
+        executable_path: final_executable_path.to_string_lossy().to_string(),
         install_type,
         pinned: version.is_some()
             && requested_version != "latest"
