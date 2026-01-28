@@ -486,7 +486,7 @@ async fn main() -> Result<()> {
                         tracing::info!("{} age: unknown", info.repo);
                     }
                 }
-                    // Create shim if auto_shim is enabled
+                // Create shim if auto_shim is enabled
                 if config.settings.auto_shim && !cfg!(windows) {
                     let bin_dir = &config.settings.bin_dir;
                     create_shim_script(bin_dir)?;
