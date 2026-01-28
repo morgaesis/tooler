@@ -73,20 +73,36 @@ elif [[ "$ASSET_NAME" == *.zip ]]; then
 fi
 
 # Install
-INSTALL_DIR="$HOME/.local/bin"
+INSTALL_DIR="$HOME/.local/share/tooler/bin"
 mkdir -p "$INSTALL_DIR"
 
-echo "📋 Installing to $INSTALL_DIR..."
+echo "📋 Installing tooler to $INSTALL_DIR..."
 mv "$BINARY_NAME" "$INSTALL_DIR/tooler"
+chmod +x "$INSTALL_DIR/tooler"
+
+# Update PATH in shell RC files
+echo "📝 Updating PATH in shell configuration..."
+PATH_LINE="export PATH=\"$INSTALL_DIR:\$PATH\""
+
+update_rc() {
+    local rc_file="$1"
+    if [[ -f "$rc_file" ]]; then
+        if ! grep -q "$INSTALL_DIR" "$rc_file"; then
+            echo "" >> "$rc_file"
+            echo "# Tooler PATH" >> "$rc_file"
+            echo "$PATH_LINE" >> "$rc_file"
+            echo "✅ Updated $rc_file"
+        fi
+    fi
+}
+
+update_rc "$HOME/.bashrc"
+update_rc "$HOME/.zshrc"
 
 # Cleanup
 cd /
 rm -rf "$TEMP_DIR"
 
 echo "✅ Installation complete!"
-echo ""
-echo "🎯 Add to PATH:"
-echo "   export PATH=\"\$HOME/.local/bin:\$PATH\""
-echo ""
-echo "🚀 Run tooler:"
-echo "   tooler --help"
+echo "🚀 Tooler and its managed tools are now in your PATH."
+echo "💡 Restart your shell or run: source ~/.bashrc (or ~/.zshrc)"
