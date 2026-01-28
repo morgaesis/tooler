@@ -1,0 +1,30 @@
+name: Smoke Test
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  smoke-test:
+    name: Post-release Smoke Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install tooler via pipe-bash
+        run: |
+          curl -sSL https://raw.githubusercontent.com/morgaesis/tooler/main/install.sh | bash
+          
+      - name: Add tooler to PATH
+        run: echo "$HOME/.local/share/tooler/bin" >> $GITHUB_PATH
+
+      - name: Verify tooler installation
+        run: |
+          tooler version
+          tooler --help
+
+      - name: Test self-management (run tooler with tooler)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # This verifies that tooler can fetch and run its own latest release
+          tooler run morgaesis/tooler --version

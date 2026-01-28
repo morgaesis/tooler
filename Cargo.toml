@@ -3,9 +3,9 @@ name = "tooler"
 version = "0.1.1"
 edition = "2021"
 description = "A CLI tool manager for GitHub Releases"
-authors = ["Your Name <your.email@example.com>"]
+authors = ["Mörgæsis <morgaesis+git@morgaes.is>"]
 license = "MIT"
-repository = "https://github.com/yourusername/tooler"
+repository = "https://github.com/morgaesis/tooler"
 
 [dependencies]
 reqwest = { version = "0.11", features = [
