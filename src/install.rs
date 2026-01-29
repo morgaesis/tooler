@@ -86,7 +86,7 @@ pub async fn install_or_update_tool(
         .map_err(|e| anyhow!("Failed to parse tool identifier: {}", e))?;
 
     let tool_name = tool_identifier.tool_name();
-    let requested_version = tool_identifier.version.as_deref().unwrap_or("latest");
+    let requested_version = tool_identifier.api_version();
 
     // Prevent installing a tool that would conflict with tooler-shim
     if tool_name.to_lowercase() == "tooler-shim" {
@@ -100,7 +100,7 @@ pub async fn install_or_update_tool(
     let (actual_version, asset_info, original_url, repo_full_name) = match tool_identifier.forge {
         Forge::GitHub => {
             let repo = tool_identifier.full_repo();
-            let release_info = get_gh_release_info(&repo, Some(requested_version)).await?;
+            let release_info = get_gh_release_info(&repo, Some(&requested_version)).await?;
             let version = release_info.tag_name.clone();
 
             let asset = if let Some(asset_name) = asset_override {

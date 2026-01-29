@@ -123,14 +123,35 @@ async fn main() -> Result<()> {
                         Err(e) => {
                             tracing::error!("Failed to update tool '{}': {}", tool_id, e);
                             if e.to_string().contains("404") {
-                                eprintln!("\nError: Tool '{}' not found on GitHub.", tool_id);
-                                eprintln!(
-                                    "Please check that the repository 'https://github.com/{}' exists.",
-                                    repo
-                                );
-                                if let Some(id) = tool_identifier {
-                                    if id.author == "unknown" {
-                                        eprintln!("\nTip: If you're trying to install a new tool, use the full 'owner/repo' format.");
+                                match tool_identifier
+                                    .as_ref()
+                                    .map(|id| id.forge.clone())
+                                    .unwrap_or(types::Forge::GitHub)
+                                {
+                                    types::Forge::GitHub => {
+                                        eprintln!(
+                                            "\nError: Tool '{}' not found on GitHub.",
+                                            tool_id
+                                        );
+                                        eprintln!(
+                                            "Please check that the repository 'https://github.com/{}' exists.",
+                                            repo
+                                        );
+                                        if let Some(id) = tool_identifier {
+                                            if id.author == "unknown" {
+                                                eprintln!("\nTip: If you're trying to install a new tool, use the full 'owner/repo' format.");
+                                            }
+                                        }
+                                    }
+                                    types::Forge::Url => {
+                                        eprintln!(
+                                            "\nError: Tool '{}' (URL) not found or returned 404.",
+                                            tool_id
+                                        );
+                                        eprintln!(
+                                            "Please check that the URL '{}' is still valid.",
+                                            repo
+                                        );
                                     }
                                 }
                             } else {
@@ -179,15 +200,28 @@ async fn main() -> Result<()> {
                 Err(e) => {
                     tracing::error!("Failed to install tool '{}': {}", tool_id, e);
                     if e.to_string().contains("404") {
-                        eprintln!("\nError: Tool '{}' not found on GitHub.", tool_id);
-                        eprintln!(
-                            "Please check that the repository 'https://github.com/{}' exists.",
-                            tool_identifier.full_repo()
-                        );
-                        if tool_identifier.author == "unknown" {
-                            eprintln!(
-                                "\nTip: If you're trying to install a new tool, use the full 'owner/repo' format."
-                            );
+                        match tool_identifier.forge {
+                            types::Forge::GitHub => {
+                                eprintln!("\nError: Tool '{}' not found on GitHub.", tool_id);
+                                eprintln!(
+                                    "Please check that the repository 'https://github.com/{}' exists.",
+                                    tool_identifier.full_repo()
+                                );
+                                if tool_identifier.author == "unknown" {
+                                    eprintln!(
+                                        "\nTip: If you're trying to install a new tool, use the full 'owner/repo' format."
+                                    );
+                                }
+                            }
+                            types::Forge::Url => {
+                                eprintln!(
+                                    "\nError: Tool '{}' (URL) not found or returned 404.",
+                                    tool_id
+                                );
+                                if let Some(url) = &tool_identifier.url {
+                                    eprintln!("Please check that the URL '{}' is valid.", url);
+                                }
+                            }
                         }
                     } else {
                         eprintln!("\nError: {}", e);
@@ -377,15 +411,28 @@ async fn main() -> Result<()> {
                     Err(e) => {
                         tracing::error!("Failed to install tool '{}': {}", tool_id, e);
                         if e.to_string().contains("404") {
-                            eprintln!("\nError: Tool '{}' not found on GitHub.", tool_id);
-                            eprintln!(
-                                "Please check that the repository 'https://github.com/{}' exists.",
-                                tool_identifier.full_repo()
-                            );
-                            if tool_identifier.author == "unknown" {
-                                eprintln!(
-                                    "\nTip: If you're trying to install a new tool, use the full 'owner/repo' format."
-                                );
+                            match tool_identifier.forge {
+                                types::Forge::GitHub => {
+                                    eprintln!("\nError: Tool '{}' not found on GitHub.", tool_id);
+                                    eprintln!(
+                                        "Please check that the repository 'https://github.com/{}' exists.",
+                                        tool_identifier.full_repo()
+                                    );
+                                    if tool_identifier.author == "unknown" {
+                                        eprintln!(
+                                            "\nTip: If you're trying to install a new tool, use the full 'owner/repo' format."
+                                        );
+                                    }
+                                }
+                                types::Forge::Url => {
+                                    eprintln!(
+                                        "\nError: Tool '{}' (URL) not found or returned 404.",
+                                        tool_id
+                                    );
+                                    if let Some(url) = &tool_identifier.url {
+                                        eprintln!("Please check that the URL '{}' is valid.", url);
+                                    }
+                                }
                             }
                         } else {
                             eprintln!("\nError: {}", e);
