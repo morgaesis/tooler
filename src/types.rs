@@ -104,9 +104,3 @@ pub struct GitHubAsset {
     pub name: String,
     pub browser_download_url: String,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct GenericRelease {
-    pub version: String,
-    pub assets: Vec<AssetInfo>,
-}
