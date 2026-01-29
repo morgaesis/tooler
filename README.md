@@ -16,6 +16,8 @@ A CLI tool manager for GitHub Releases written in Rust.
 - **Version Pinning**: Pin tools to specific versions to prevent auto-updates
 - **Complex Version Support**: Handle GitHub release tags with slashes (e.g., infisical-cli/v0.41.90)
 
+![Tooler Demo](./assets/demo.svg)
+
 ## Installation
 
 ### Bootstrapped
