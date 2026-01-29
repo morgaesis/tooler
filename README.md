@@ -130,6 +130,16 @@ cargo run -- run nektos/act --help
 cargo build --release
 ```
 
+### Generating Demo Animation
+
+The animated demo in the README is generated using `scripts/gen_demo.js` and `svg-term-cli`.
+
+```bash
+node scripts/gen_demo.js
+npx svg-term-cli --in demo.cast --out assets/demo.svg --window
+rm demo.cast
+```
+
 ## License
 
 MIT (see the [LICENSE](LICENSE))
