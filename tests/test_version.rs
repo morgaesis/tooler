@@ -28,6 +28,6 @@ fn main() {
             requested_clean == existing_clean
         }
     }
-    
+
     println!("1.2 vs 1.3.0: {}", version_matches("1.2", "1.3.0"));
 }
