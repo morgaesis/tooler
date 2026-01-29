@@ -2,6 +2,15 @@ use serde::{Deserialize, Serialize};
 use std::cmp::PartialEq;
 use std::collections::HashMap;
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub enum Forge {
+    #[serde(rename = "github")]
+    #[default]
+    GitHub,
+    #[serde(rename = "url")]
+    Url,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolInfo {
     pub tool_name: String,
@@ -13,6 +22,10 @@ pub struct ToolInfo {
     pub pinned: bool,
     pub installed_at: String,
     pub last_accessed: String,
+    #[serde(default)]
+    pub forge: Forge,
+    #[serde(default)]
+    pub original_url: Option<String>,
 }
 
 fn default_pinned() -> bool {
@@ -90,4 +103,10 @@ pub struct GitHubRelease {
 pub struct GitHubAsset {
     pub name: String,
     pub browser_download_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GenericRelease {
+    pub version: String,
+    pub assets: Vec<AssetInfo>,
 }

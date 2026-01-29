@@ -160,6 +160,8 @@ mod tests {
             pinned: false,
             installed_at: now.clone(),
             last_accessed: now.clone(),
+            forge: crate::types::Forge::GitHub,
+            original_url: None,
         });
 
         tools.push(ToolInfo {
@@ -171,6 +173,8 @@ mod tests {
             pinned: false,
             installed_at: now.clone(),
             last_accessed: now.clone(),
+            forge: crate::types::Forge::GitHub,
+            original_url: None,
         });
 
         tools.push(ToolInfo {
@@ -182,6 +186,8 @@ mod tests {
             pinned: false,
             installed_at: now.clone(),
             last_accessed: now.clone(),
+            forge: crate::types::Forge::GitHub,
+            original_url: None,
         });
 
         // Test finding highest version
@@ -213,6 +219,8 @@ mod tests {
             pinned: false,
             installed_at: now.clone(),
             last_accessed: now.clone(),
+            forge: crate::types::Forge::GitHub,
+            original_url: None,
         };
 
         // Add tool to config
@@ -265,6 +273,8 @@ mod tests {
                 pinned: true,
                 installed_at: now.clone(),
                 last_accessed: now.clone(),
+                forge: crate::types::Forge::GitHub,
+                original_url: None,
             },
         );
 
@@ -279,6 +289,8 @@ mod tests {
                 pinned: false,
                 installed_at: now.clone(),
                 last_accessed: now.clone(),
+                forge: crate::types::Forge::GitHub,
+                original_url: None,
             },
         );
 
@@ -354,6 +366,8 @@ mod tests {
             pinned: true,
             installed_at: now.clone(),
             last_accessed: now.clone(),
+            forge: crate::types::Forge::GitHub,
+            original_url: None,
         };
 
         // Test serialization
@@ -433,5 +447,36 @@ mod tests {
             result.is_none(),
             "Should not fall back to amd64 when looking for arm64"
         );
+    }
+
+    #[tokio::test]
+    async fn test_url_forge_install() {
+        use crate::install::install_or_update_tool;
+        use crate::types::Forge;
+
+        let mut config = ToolerConfig::default();
+
+        let url = if platform::get_system_info().arch == "arm64" {
+            "https://dl.k8s.io/release/v1.31.0/bin/linux/arm64/kubectl"
+        } else {
+            "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl"
+        };
+
+        let result = install_or_update_tool(&mut config, url, false, None).await;
+
+        if let Err(ref e) = result {
+            panic!("Installation failed: {}", e);
+        }
+
+        let path = result.unwrap();
+        assert!(path.exists());
+        assert!(path.to_string_lossy().contains("url/direct__kubectl__"));
+
+        let tool_info = config
+            .tools
+            .get("direct/kubectl@v1.31.0")
+            .expect("Tool not in config");
+        assert_eq!(tool_info.forge, Forge::Url);
+        assert_eq!(tool_info.version, "1.31.0");
     }
 }

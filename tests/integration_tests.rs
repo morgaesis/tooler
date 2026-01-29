@@ -86,7 +86,8 @@ fn test_auto_shim_creation() {
                 "install_type": "binary",
                 "pinned": true,
                 "installed_at": "2024-01-01T00:00:00Z",
-                "last_accessed": "2024-01-01T00:00:00Z"
+                "last_accessed": "2024-01-01T00:00:00Z",
+                "forge": "github"
             }}
         }},
         "settings": {{
@@ -147,7 +148,8 @@ fn test_update_check_triggers() {
                 "install_type": "binary",
                 "pinned": false,
                 "installed_at": "2024-01-01T00:00:00Z",
-                "last_accessed": "2024-01-01T00:00:00Z"
+                "last_accessed": "2024-01-01T00:00:00Z",
+                "forge": "github"
             }}
         }},
         "settings": {{
@@ -174,5 +176,5 @@ fn test_update_check_triggers() {
 
     // It should check for updates. Even if it fails (no network), it should log the attempt.
     output.assert_stdout_contains("Checking for tools not updated in >5 days");
-    output.assert_stdout_contains("Checking for update for derailed/k9s");
+    output.assert_stdout_contains("Checking for GitHub update for derailed/k9s");
 }

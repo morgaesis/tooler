@@ -74,9 +74,7 @@ async fn main() -> Result<()> {
                         if let Some(info) = config.tools.get(&key).cloned() {
                             match install_or_update_tool(
                                 &mut config,
-                                &info.tool_name,
-                                &info.repo,
-                                Some("latest"),
+                                &info.repo, // Pass the repo or the key
                                 true,
                                 None,
                             )
@@ -94,13 +92,8 @@ async fn main() -> Result<()> {
                 } else {
                     // First find the existing tool to get the correct repo
                     let existing_tool = find_tool_executable(&config, &tool_id);
-                    let (tool_name, repo, tool_identifier) = if let Some(tool_info) = existing_tool
-                    {
-                        (
-                            tool_info.tool_name.clone(),
-                            tool_info.repo.clone(),
-                            ToolIdentifier::parse(&tool_id).ok(),
-                        )
+                    let (repo, tool_identifier) = if let Some(tool_info) = existing_tool {
+                        (tool_info.repo.clone(), ToolIdentifier::parse(&tool_id).ok())
                     } else {
                         let tool_identifier = match ToolIdentifier::parse(&tool_id) {
                             Ok(id) => id,
@@ -114,19 +107,13 @@ async fn main() -> Result<()> {
                                 return Err(anyhow!("Invalid tool identifier: {}", e));
                             }
                         };
-                        (
-                            tool_identifier.tool_name(),
-                            tool_identifier.full_repo(),
-                            Some(tool_identifier),
-                        )
+                        (tool_identifier.full_repo(), Some(tool_identifier))
                     };
 
                     tracing::info!("Attempting to update {}...", repo);
                     match install_or_update_tool(
                         &mut config,
-                        &tool_name,
-                        &repo,
-                        Some("latest"),
+                        &repo, // Use the stored repo (which is 'direct/kubectl' or similar)
                         true,
                         None,
                     )
@@ -160,16 +147,7 @@ async fn main() -> Result<()> {
         }
         Commands::Pull { tool_id } => {
             let tool_identifier = match ToolIdentifier::parse(&tool_id) {
-                Ok(id) => {
-                    if id.author == "unknown" {
-                        eprintln!("\nError: Tool '{}' not found locally.", tool_id);
-                        eprintln!(
-                            "To install a new tool from GitHub, use the full 'owner/repo' format."
-                        );
-                        std::process::exit(1);
-                    }
-                    id
-                }
+                Ok(id) => id,
                 Err(e) => {
                     if tool_id.starts_with('-') {
                         eprintln!(
@@ -187,21 +165,10 @@ async fn main() -> Result<()> {
                 }
             };
 
-            let repo = tool_identifier.full_repo();
-            let tool_name = tool_identifier.tool_name();
-            let api_version = tool_identifier.api_version();
-            let version = Some(api_version.as_str());
-
-            tracing::info!("Pulling version {} of {}...", api_version, repo);
-            match install_or_update_tool(&mut config, &tool_name, &repo, version, true, None).await
-            {
+            tracing::info!("Pulling {}...", tool_id);
+            match install_or_update_tool(&mut config, &tool_id, true, None).await {
                 Ok(path) => {
-                    tracing::info!(
-                        "Successfully pulled {} {} to {}",
-                        repo,
-                        api_version,
-                        path.display()
-                    );
+                    tracing::info!("Successfully pulled {} to {}", tool_id, path.display());
                     // Create shim if auto_shim is enabled
                     if config.settings.auto_shim && !cfg!(windows) {
                         let bin_dir = &config.settings.bin_dir;
@@ -389,7 +356,6 @@ async fn main() -> Result<()> {
                     return Err(anyhow!("Invalid tool identifier: {}", tool_id));
                 }
             };
-            let version_req = tool_identifier.api_version();
             // Check for updates if not a pinned version
             if !tool_identifier.is_pinned() {
                 check_for_updates(&mut config).await?;
@@ -398,30 +364,12 @@ async fn main() -> Result<()> {
             // Install if not found or if asset override is used
             if tool_info.is_none() || asset.is_some() {
                 if tool_info.is_none() {
-                    // Check if it's a full repo format before attempting to install
-                    if tool_identifier.author == "unknown" {
-                        eprintln!("\nError: Tool '{}' not found locally.", tool_id);
-                        eprintln!(
-                            "To install a new tool from GitHub, use the full 'owner/repo' format."
-                        );
-                        std::process::exit(1);
-                    }
-
                     tracing::info!(
                         "Tool {} not found locally or is corrupted. Attempting to install...",
                         tool_id
                     );
                 }
-                match install_or_update_tool(
-                    &mut config,
-                    &tool_identifier.tool_name(),
-                    &tool_identifier.full_repo(),
-                    Some(&version_req),
-                    false,
-                    asset.as_deref(),
-                )
-                .await
-                {
+                match install_or_update_tool(&mut config, &tool_id, false, asset.as_deref()).await {
                     Ok(_) => {
                         config = load_tool_configs()?; // Reload config
                         tool_info = find_tool_executable(&config, &tool_id);
@@ -506,7 +454,22 @@ async fn main() -> Result<()> {
                 let mut cmd = Command::new(&executable_path);
                 cmd.args(&tool_args);
                 tracing::debug!("Executing: {:?} {:?}", executable_path, tool_args);
-                let mut child = cmd.spawn()?;
+                let mut child = cmd.spawn().map_err(|e| {
+                    if e.raw_os_error() == Some(8) {
+                        anyhow!(
+                            "Failed to execute '{}': Exec format error.\n\n\
+                            This often happens if:\n\
+                            1. The file is a script or installer, not a binary.\n\
+                            2. The binary was built for a different CPU architecture.\n\
+                            3. The file is a directory or archive that wasn't extracted correctly.\n\n\
+                            Check the file type with 'file {}'",
+                            executable_path,
+                            executable_path
+                        )
+                    } else {
+                        anyhow!("Failed to execute tool: {}", e)
+                    }
+                })?;
                 let status = child.wait()?;
                 std::process::exit(status.code().unwrap_or(1));
             } else {
@@ -638,10 +601,16 @@ fn list_installed_tools(config: &types::ToolerConfig) {
             "".to_string()
         };
 
+        let forge_emoji = match info.forge {
+            types::Forge::GitHub => "🐙",
+            types::Forge::Url => "🔗",
+        };
+
         println!(
-            "  - {} ({}) {}{}[{} | {} | {}]{}",
+            "  - {} ({}) {}{}{}[{} | {} | {}]{}",
             info.repo,
             info.version,
+            forge_emoji,
             pin_status,
             install_type_emoji,
             info.install_type,
@@ -696,40 +665,76 @@ async fn check_for_updates(config: &mut types::ToolerConfig) -> Result<()> {
         return Ok(());
     }
 
-    // 2. Check for updates on GitHub (does not borrow config)
+    // 2. Check for updates (does not borrow config)
     for (key, name, repo, version) in stale_tools {
-        tracing::info!("Checking for update for {} (current: {})...", repo, version);
+        let tool_info = config.tools.get(&key).unwrap();
 
-        if let Ok(release) = install::get_gh_release_info(&repo, Some("latest")).await {
-            let current_clean = version.trim_start_matches('v');
-            let latest_clean = release.tag_name.trim_start_matches('v');
+        match tool_info.forge {
+            types::Forge::GitHub => {
+                tracing::info!(
+                    "Checking for GitHub update for {} (current: {})...",
+                    repo,
+                    version
+                );
+                if let Ok(release) = install::get_gh_release_info(&repo, Some("latest")).await {
+                    let current_clean = version.trim_start_matches('v');
+                    let latest_clean = release.tag_name.trim_start_matches('v');
 
-            if latest_clean != current_clean {
-                if config.settings.auto_update {
-                    tools_to_auto_update.push((name, repo.clone(), release.tag_name));
+                    if latest_clean != current_clean {
+                        if config.settings.auto_update {
+                            tools_to_auto_update.push((name, repo.clone(), release.tag_name));
+                        } else {
+                            updates_found.push(format!(
+                                "Tool {} ({}) has update: {} -> {}",
+                                name, repo, version, release.tag_name
+                            ));
+                        }
+                    }
+                    keys_to_update.push(key);
                 } else {
-                    updates_found.push(format!(
-                        "Tool {} ({}) has update: {} -> {}",
-                        name, repo, version, release.tag_name
-                    ));
+                    tracing::warn!(
+                        "Could not get latest release for {} during update check",
+                        repo
+                    );
                 }
             }
-            keys_to_update.push(key);
-        } else {
-            tracing::warn!(
-                "Could not get latest release for {} during update check",
-                repo
-            );
+            types::Forge::Url => {
+                if let Some(url) = &tool_info.original_url {
+                    tracing::info!("Checking for URL update for {} at {}...", name, url);
+                    if let Ok(versions) = install::discover_url_versions(url).await {
+                        if let Some(latest) = versions.last() {
+                            let current_clean = version.trim_start_matches('v');
+                            let latest_clean = latest.trim_start_matches('v');
+
+                            if latest_clean != current_clean {
+                                let new_url = url.replace(version.as_str(), latest);
+                                if config.settings.auto_update {
+                                    tools_to_auto_update.push((name, new_url, latest.clone()));
+                                } else {
+                                    updates_found.push(format!(
+                                        "Tool {} (URL) has update: {} -> {} (URL: {})",
+                                        name, version, latest, new_url
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    keys_to_update.push(key);
+                }
+            }
         }
     }
 
     // 3. Perform auto-updates (mutably borrows config)
     if !tools_to_auto_update.is_empty() {
-        eprintln!("Auto-updating {} stale tools...", tools_to_auto_update.len());
+        eprintln!(
+            "Auto-updating {} stale tools...",
+            tools_to_auto_update.len()
+        );
     }
-    for (name, repo, version) in tools_to_auto_update {
+    for (_name, repo, version) in tools_to_auto_update {
         tracing::info!("Auto-updating {} to {}...", repo, version);
-        match install_or_update_tool(config, &name, &repo, Some(&version), true, None).await {
+        match install_or_update_tool(config, &repo, true, None).await {
             Ok(_) => tracing::info!("{} auto-updated successfully", repo),
             Err(e) => tracing::error!("Failed to auto-update {}: {}", repo, e),
         }

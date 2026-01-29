@@ -1,12 +1,14 @@
+use crate::types::Forge;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ToolIdentifier {
-    pub forge: String,
+    pub forge: Forge,
     pub author: String,
     pub repo: String,
     pub version: Option<String>,
+    pub url: Option<String>,
 }
 
 impl ToolIdentifier {
@@ -15,6 +17,7 @@ impl ToolIdentifier {
     /// - "owner/repo@v1.2.3" (specific version)
     /// - "repo" (short name, looks up in config)
     /// - "repo@v1.2.3" (short name with version)
+    /// - "https://..." (direct URL)
     pub fn parse(tool_id: &str) -> Result<Self, String> {
         if tool_id.is_empty() {
             return Err("Tool identifier cannot be empty".to_string());
@@ -25,6 +28,49 @@ impl ToolIdentifier {
                 "Invalid tool identifier '{}'. It looks like a CLI flag.",
                 tool_id
             ));
+        }
+
+        // Handle URL forge
+        if tool_id.starts_with("http://") || tool_id.starts_with("https://") {
+            let (url_part, version_part) = if tool_id.contains('@') && !tool_id.contains("@v") {
+                // If it contains @ but it's not part of a version string (like in a path),
+                // we might need careful parsing. But usually @ is for versioning in tooler.
+                // However, for URLs, @ is rare unless it's for credentials (which we don't support here).
+                // Let's assume @ at the end is for version pinning.
+                let mut parts = tool_id.rsplitn(2, '@');
+                let version = parts.next().map(|s| s.to_string());
+                let url = parts.next().unwrap_or(tool_id).to_string();
+                (url, version)
+            } else {
+                (tool_id.to_string(), None)
+            };
+
+            let name = url_part
+                .split('/')
+                .next_back()
+                .unwrap_or("unknown_tool")
+                .split('?')
+                .next()
+                .unwrap_or("unknown_tool")
+                .trim_end_matches(".zip")
+                .trim_end_matches(".tar.gz")
+                .trim_end_matches(".tgz")
+                .trim_end_matches(".tar.xz")
+                .to_string();
+
+            // Attempt to guess version from URL if not provided
+            let version = version_part.or_else(|| {
+                let re = regex::Regex::new(r"v?(\d+\.\d+\.\d+)").ok()?;
+                re.find(&url_part).map(|m| m.as_str().to_string())
+            });
+
+            return Ok(ToolIdentifier {
+                forge: Forge::Url,
+                author: "direct".to_string(),
+                repo: name,
+                version,
+                url: Some(url_part),
+            });
         }
 
         // Handle @ for version
@@ -54,10 +100,11 @@ impl ToolIdentifier {
         };
 
         Ok(ToolIdentifier {
-            forge: "github".to_string(),
+            forge: Forge::GitHub,
             author,
             repo,
             version: version_part,
+            url: None,
         })
     }
 

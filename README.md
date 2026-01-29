@@ -4,7 +4,9 @@ A CLI tool manager for GitHub Releases written in Rust.
 
 ## Features
 
-- **Tool Management**: Install, update, and remove tools from GitHub releases
+- **Forge Support**: Seamlessly manages tools from GitHub Releases and direct URLs
+- **Direct URL Installation**: Install and shim any binary or archive from the internet directly
+- **Intelligent Discovery**: Automatically detects tool names and versions from URLs and attempts to discover updates via directory scraping
 - **Platform Detection**: Automatically detects your OS and architecture to download the right binaries
 - **Archive Support**: Extracts tar.gz, tar.xz, and zip archives
 - **Python Support**: Installs Python tools from wheel files with virtual environments
@@ -18,15 +20,19 @@ A CLI tool manager for GitHub Releases written in Rust.
 
 ```mermaid
 graph TD
-    User([User Command e.g. 'k9s']) --> Path[PATH Lookup]
+    User([User Command e.g. 'kubectl']) --> Path[PATH Lookup]
     Path --> BinDir[Bin Directory]
     BinDir --> ShimScript[tooler-shim]
-    ShimScript --> ToolerRun[tooler run k9s]
+    ShimScript --> ToolerRun[tooler run kubectl]
 
     subgraph Tooler Logic
         ToolerRun --> AgeCheck{Stale?}
-        AgeCheck -- Yes --> Update[GitHub API Update Check]
-        Update --> Download[Download & Extract]
+        AgeCheck -- Yes --> Update[Update Check]
+        Update --> Forge{Forge?}
+        Forge -- GitHub --> GH[GitHub API]
+        Forge -- URL --> Scrape[Directory Scrape]
+        GH --> Download
+        Scrape --> Download[Download & Extract]
         Download --> Exec
         AgeCheck -- No --> Exec[Find Executable]
     end
@@ -65,6 +71,18 @@ cargo install --path .
 ```
 
 ## Usage
+
+### Universal URL Installation
+
+Tooler can install and manage tools directly from a URL. It attempts to guess the name and version from the URL path.
+
+```bash
+# Install kubectl from official source
+tooler run https://dl.k8s.io/release/v1.31.0/bin/linux/arm64/kubectl --version
+
+# Install a tool from a specific archive URL
+tooler run https://example.com/downloads/mytool-v1.0.0-linux-amd64.tar.gz --help
+```
 
 ### Basic Commands
 

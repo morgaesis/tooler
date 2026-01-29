@@ -17,7 +17,11 @@ pub async fn download_file(url: &str, local_path: &Path) -> Result<()> {
     let response = reqwest::get(url).await?;
     let total_size = response.content_length().unwrap_or(0);
 
-    let filename = local_path.file_name().unwrap().to_string_lossy().to_string();
+    let filename = local_path
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
     let pb = ProgressBar::new(total_size);
     pb.set_style(
         ProgressStyle::default_bar()
