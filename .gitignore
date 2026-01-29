@@ -212,6 +212,8 @@ __marimo__/
 /target
 
 
+/*.md
 !/README.md
 !/AGENTS.md
-/*.md
+!/ARCHITECTURE.md
+!/ROADMAP.md

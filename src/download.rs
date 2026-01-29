@@ -155,7 +155,7 @@ fn extract_tar_xz(archive_path: &Path, extract_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn find_executable_in_extracted(
+pub fn find_executable_in_extracted(
     extract_dir: &Path,
     tool_name: &str,
     repo_full_name: &str,
@@ -256,7 +256,7 @@ fn find_executable_in_extracted(
     candidates.into_iter().map(|(_, path)| path).next()
 }
 
-fn is_executable(filepath: &Path, os_system: &str) -> bool {
+pub fn is_executable(filepath: &Path, os_system: &str) -> bool {
     if !filepath.is_file() {
         return false;
     }
@@ -265,8 +265,11 @@ fn is_executable(filepath: &Path, os_system: &str) -> bool {
         let ext = filepath.extension().and_then(|s| s.to_str()).unwrap_or("");
         matches!(ext.to_lowercase().as_str(), "exe" | "cmd" | "bat")
     } else {
-        // On Unix-like systems, check if it's a regular file and not a library
+        // On Unix-like systems, check if it's a regular file and not a library/archive
         let ext = filepath.extension().and_then(|s| s.to_str()).unwrap_or("");
-        !matches!(ext.to_lowercase().as_str(), "dll" | "so" | "dylib")
+        !matches!(
+            ext.to_lowercase().as_str(),
+            "dll" | "so" | "dylib" | "gz" | "zip" | "tar" | "xz" | "tgz"
+        )
     }
 }

@@ -78,6 +78,10 @@ pub enum Commands {
 
     /// Show the current version
     Version,
+
+    /// Catch-all for running tools directly
+    #[command(external_subcommand)]
+    External(Vec<String>),
 }
 
 #[derive(Subcommand)]

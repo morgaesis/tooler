@@ -10,6 +10,11 @@ pub const TOOLS_DIR_NAME: &str = "tools";
 pub const CONFIG_FILE_NAME: &str = "config.json";
 
 pub fn get_user_data_dir() -> Result<PathBuf> {
+    if let Ok(env_path) = std::env::var("TOOLER_DATA_DIR") {
+        let path = PathBuf::from(env_path);
+        fs::create_dir_all(&path)?;
+        return Ok(path);
+    }
     let path = dirs::data_dir()
         .ok_or_else(|| anyhow::anyhow!("Could not determine data directory"))?
         .join(APP_NAME);
@@ -19,6 +24,11 @@ pub fn get_user_data_dir() -> Result<PathBuf> {
 }
 
 pub fn get_user_config_dir() -> Result<PathBuf> {
+    if let Ok(env_path) = std::env::var("TOOLER_CONFIG_DIR") {
+        let path = PathBuf::from(env_path);
+        fs::create_dir_all(&path)?;
+        return Ok(path);
+    }
     let path = dirs::config_dir()
         .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?
         .join(CONFIG_DIR_NAME);

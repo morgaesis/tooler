@@ -1,74 +1,401 @@
 use crate::config::*;
-use crate::download::{download_file, extract_archive};
+use crate::download::{download_file, extract_archive, find_executable_in_extracted};
 use crate::platform::{find_asset_for_platform, get_system_info};
 use crate::tool_id::ToolIdentifier;
 use crate::types::*;
 use anyhow::{anyhow, Result};
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
-use tempfile::TempDir;
+use std::path::PathBuf;
+use walkdir::WalkDir;
 
-pub async fn get_gh_release_info(
-    repo_full_name: &str,
-    version: Option<&str>,
-) -> Result<GitHubRelease> {
-    let version = version.unwrap_or("latest");
-    let url = if version == "latest" {
-        format!(
-            "https://api.github.com/repos/{}/releases/latest",
-            repo_full_name
-        )
-    } else {
-        // Smart version handling: don't add 'v' prefix for non-numeric versions like "tip", "master"
-        // or versions containing slashes like "infisical-cli/v0.41.90"
-        // but preserve existing 'v' prefixes and add 'v' for numeric versions
-        let version = if version.starts_with('v') {
-            version
-        } else if version.chars().next().is_some_and(|c| c.is_ascii_digit())
-            && !version.contains('/')
-        {
-            // Only add 'v' to purely numeric versions without slashes
-            &format!("v{}", version)
-        } else {
-            version
-        };
-        format!(
-            "https://api.github.com/repos/{}/releases/tags/{}",
-            repo_full_name, version
-        )
-    };
-
-    tracing::debug!("Fetching GitHub release info from: {}", url);
-
-    let client = reqwest::Client::new();
-    let mut request = client
-        .get(&url)
-        .header("Accept", "application/vnd.github.v3+json")
-        .header("User-Agent", "tooler/0.1.0");
-
-    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
-        request = request.header("Authorization", format!("token {}", token));
-        tracing::debug!("Using GITHUB_TOKEN");
+pub fn list_installed_tools(config: &ToolerConfig) {
+    use console::style;
+    println!("--- Installed Tooler Tools ---");
+    if config.tools.is_empty() {
+        println!("  No tools installed yet.");
+        return;
     }
 
-    let response = request.send().await?;
-    if !response.status().is_success() {
-        let status = response.status();
-        if status == reqwest::StatusCode::NOT_FOUND {
-            return Err(anyhow!(
-                "Tool repository or version not found on GitHub. (Status: 404)"
-            ));
+    let mut tools: Vec<_> = config.tools.values().collect();
+    tools.sort_by_key(|t| &t.repo);
+
+    let now = Utc::now();
+
+    for info in tools {
+        let pin_status = if info.pinned { "📌 " } else { "" };
+        let install_type_emoji = match info.install_type.as_str() {
+            "archive" => "📦",
+            "binary" => "🚀",
+            "python-venv" => "🐍",
+            _ => "🛠️",
+        };
+
+        let arch = if info.executable_path.contains("__") {
+            info.executable_path
+                .split("__")
+                .nth(2)
+                .and_then(|s| s.split('/').next())
+                .unwrap_or("unknown")
+        } else {
+            "unknown"
+        };
+
+        let (age_str, is_eligible) = match info.installed_at.parse::<DateTime<Utc>>() {
+            Ok(installed_at) => {
+                let duration = now - installed_at;
+                let days = duration.num_days();
+                let s = if days > 0 {
+                    format!("{}d", days)
+                } else if duration.num_hours() > 0 {
+                    format!("{}h", duration.num_hours())
+                } else {
+                    format!("{}m", duration.num_minutes())
+                };
+                let eligible = days >= config.settings.update_check_days as i64;
+                (s, eligible)
+            }
+            Err(_) => ("unknown".to_string(), false),
+        };
+
+        let age_colored = if is_eligible {
+            style(&age_str).red().bold()
+        } else {
+            style(&age_str).green()
+        };
+
+        let update_note = if is_eligible && !info.pinned {
+            format!(" {}", style("(! stale)").yellow().italic())
+        } else {
+            "".to_string()
+        };
+
+        let forge_emoji = match info.forge {
+            Forge::GitHub => "🐙",
+            Forge::Url => "🔗",
+        };
+
+        println!(
+            "  - {} ({}) {}{}{}[{} | {} | {}]{}",
+            info.repo,
+            info.version,
+            forge_emoji,
+            pin_status,
+            install_type_emoji,
+            info.install_type,
+            arch,
+            age_colored,
+            update_note
+        );
+        println!("    Path:    {}\n", info.executable_path);
+    }
+    println!("------------------------------");
+}
+
+pub async fn check_for_updates(config: &mut ToolerConfig) -> Result<()> {
+    if config.settings.update_check_days <= 0 {
+        return Ok(());
+    }
+
+    tracing::info!(
+        "Checking for tools not updated in >{} days...",
+        config.settings.update_check_days
+    );
+    let now = Utc::now();
+    let mut updates_found = Vec::new();
+    let mut keys_to_update = Vec::new();
+    let mut tools_to_auto_update = Vec::new();
+
+    let stale_tools: Vec<(String, String, String, String)> = config
+        .tools
+        .iter()
+        .filter_map(|(key, info)| {
+            if info.pinned {
+                return None;
+            }
+            let check_time = info.last_checked.as_deref().unwrap_or(&info.last_accessed);
+
+            if let Ok(last_checked) = check_time.parse::<DateTime<Utc>>() {
+                let days_since_check = (now - last_checked).num_days();
+                if days_since_check > config.settings.update_check_days as i64 {
+                    return Some((
+                        key.clone(),
+                        info.tool_name.clone(),
+                        info.repo.clone(),
+                        info.version.clone(),
+                    ));
+                }
+            }
+            None
+        })
+        .collect();
+
+    if stale_tools.is_empty() {
+        tracing::info!("No stale unpinned tools found to check for updates.");
+        return Ok(());
+    }
+
+    for (key, name, repo, version) in stale_tools {
+        let tool_info = config.tools.get(&key).unwrap();
+
+        match tool_info.forge {
+            Forge::GitHub => {
+                tracing::info!(
+                    "Checking for GitHub update for {} (current: {})...",
+                    repo,
+                    version
+                );
+                if let Ok(release) = get_gh_release_info(&repo, Some("latest")).await {
+                    let current_clean = version.trim_start_matches('v');
+                    let latest_clean = release.tag_name.trim_start_matches('v');
+
+                    if latest_clean != current_clean {
+                        if config.settings.auto_update {
+                            tools_to_auto_update.push((name, repo.clone(), release.tag_name));
+                        } else {
+                            updates_found.push(format!(
+                                "Tool {} ({}) has update: {} -> {}",
+                                name, repo, version, release.tag_name
+                            ));
+                        }
+                    }
+                    keys_to_update.push(key);
+                }
+            }
+            Forge::Url => {
+                if let Some(url) = &tool_info.original_url {
+                    tracing::info!("Checking for URL update for {} at {}...", name, url);
+                    if let Ok(versions) = discover_url_versions(url).await {
+                        if let Some(latest) = versions.last() {
+                            let current_clean = version.trim_start_matches('v');
+                            let latest_clean = latest.trim_start_matches('v');
+
+                            if latest_clean != current_clean {
+                                let new_url = url.replace(version.as_str(), latest);
+                                if config.settings.auto_update {
+                                    tools_to_auto_update.push((name, new_url, latest.clone()));
+                                } else {
+                                    updates_found.push(format!(
+                                        "Tool {} (URL) has update: {} -> {} (URL: {})",
+                                        name, version, latest, new_url
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    keys_to_update.push(key);
+                }
+            }
         }
-        let error_text = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unable to read error response".to_string());
+    }
+
+    if !tools_to_auto_update.is_empty() {
+        eprintln!(
+            "Auto-updating {} stale tools...",
+            tools_to_auto_update.len()
+        );
+    }
+    for (_name, repo, _version) in tools_to_auto_update {
+        match install_or_update_tool(config, &repo, true, None).await {
+            Ok(_) => tracing::info!("{} auto-updated successfully", repo),
+            Err(e) => tracing::error!("Failed to auto-update {}: {}", repo, e),
+        }
+    }
+
+    for key in keys_to_update {
+        if let Some(tool_info) = config.tools.get_mut(&key) {
+            tool_info.last_checked = Some(now.to_rfc3339());
+        }
+    }
+
+    if !updates_found.is_empty() {
+        save_tool_configs(config)?;
+        eprintln!("\n--- Tool Updates Available ---");
+        for msg in updates_found {
+            eprintln!("  {}", msg);
+        }
+        eprintln!("To update, run `tooler update [repo/tool]` or `tooler update all`.");
+        eprintln!("----------------------------\n");
+    }
+
+    Ok(())
+}
+
+pub async fn install_or_update_tool(
+    config: &mut ToolerConfig,
+    tool_id: &str,
+    is_update: bool,
+    asset_name: Option<&str>,
+) -> Result<PathBuf> {
+    let tool_identifier = ToolIdentifier::parse(tool_id).map_err(|e| anyhow!(e))?;
+    let system_info = get_system_info();
+
+    // 1. Get release info
+    let release_info = match tool_identifier.forge {
+        Forge::GitHub => {
+            get_gh_release_info(
+                &tool_identifier.full_repo(),
+                tool_identifier.version.as_deref(),
+            )
+            .await?
+        }
+        Forge::Url => GitHubRelease {
+            tag_name: tool_identifier
+                .version
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string()),
+            assets: vec![],
+        },
+    };
+
+    // 2. Determine architecture-specific download URL
+    let (download_url, original_url) = match tool_identifier.forge {
+        Forge::GitHub => {
+            let asset_url = if let Some(name) = asset_name {
+                release_info
+                    .assets
+                    .iter()
+                    .find(|a| a.name == name)
+                    .map(|a| a.browser_download_url.clone())
+                    .ok_or_else(|| anyhow!("Asset {} not found in release", name))?
+            } else {
+                find_asset_for_platform(
+                    &release_info.assets,
+                    &tool_identifier.full_repo(),
+                    &system_info.os,
+                    &system_info.arch,
+                )?
+                .map(|a| a.download_url)
+                .ok_or_else(|| anyhow!("No suitable asset found for platform"))?
+            };
+            (asset_url, None)
+        }
+        Forge::Url => (
+            tool_identifier
+                .url
+                .clone()
+                .ok_or_else(|| anyhow!("No URL provided"))?,
+            tool_identifier.url.clone(),
+        ),
+    };
+
+    // 3. Setup paths
+    let tools_dir = get_tooler_tools_dir()?;
+    let forge_name = match tool_identifier.forge {
+        Forge::GitHub => "github",
+        Forge::Url => "url",
+    };
+
+    let tool_dir_name = format!(
+        "{}__{}__{}",
+        tool_identifier.author,
+        tool_identifier.tool_name(),
+        system_info.arch
+    );
+    let tool_install_dir = tools_dir.join(forge_name).join(&tool_dir_name);
+    let version_dir = tool_install_dir.join(&release_info.tag_name);
+
+    // 4. Download and extract
+    if version_dir.exists() && !is_update {
+        tracing::info!(
+            "Tool {} v{} already installed",
+            tool_id,
+            release_info.tag_name
+        );
+        let archive_name = download_url.split('/').last().unwrap_or("unknown");
+        let archive_path = version_dir.join(archive_name);
+        if let Some(exec_path) = find_executable_in_extracted(
+            &version_dir,
+            &tool_identifier.tool_name(),
+            &tool_identifier.full_repo(),
+            &system_info.os,
+            &archive_path,
+        ) {
+            return Ok(exec_path);
+        }
+    }
+
+    fs::create_dir_all(&version_dir)?;
+    let archive_name = download_url.split('/').last().unwrap_or("unknown");
+    let archive_path = version_dir.join(archive_name);
+
+    download_file(&download_url, &archive_path).await?;
+
+    let executable_path = if archive_name.ends_with(".zip")
+        || archive_name.ends_with(".tar.gz")
+        || archive_name.ends_with(".tgz")
+        || archive_name.ends_with(".tar.xz")
+    {
+        extract_archive(
+            &archive_path,
+            &version_dir,
+            &tool_identifier.tool_name(),
+            &tool_identifier.full_repo(),
+        )?
+    } else {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&archive_path)?.permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&archive_path, perms)?;
+        }
+        archive_path.clone()
+    };
+
+    // 5. Update config
+    let tool_info = ToolInfo {
+        tool_name: tool_identifier.tool_name().to_lowercase(),
+        repo: tool_identifier.full_repo(),
+        version: release_info.tag_name,
+        executable_path: executable_path.to_string_lossy().to_string(),
+        install_type: if archive_name.contains('.') {
+            archive_name
+                .split('.')
+                .last()
+                .unwrap_or("binary")
+                .to_string()
+        } else {
+            "binary".to_string()
+        },
+        pinned: tool_identifier.is_pinned(),
+        installed_at: Utc::now().to_rfc3339(),
+        last_accessed: Utc::now().to_rfc3339(),
+        last_checked: Some(Utc::now().to_rfc3339()),
+        forge: tool_identifier.forge.clone(),
+        original_url,
+    };
+
+    let key = tool_identifier.config_key();
+    config.tools.insert(key, tool_info);
+    save_tool_configs(config)?;
+
+    Ok(executable_path)
+}
+
+pub async fn get_gh_release_info(repo: &str, version: Option<&str>) -> Result<GitHubRelease> {
+    let url = if let Some(v) = version {
+        if v == "latest" {
+            format!("https://api.github.com/repos/{}/releases/latest", repo)
+        } else {
+            format!("https://api.github.com/repos/{}/releases/tags/{}", repo, v)
+        }
+    } else {
+        format!("https://api.github.com/repos/{}/releases/latest", repo)
+    };
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&url)
+        .header("User-Agent", "tooler")
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
         return Err(anyhow!(
-            "GitHub API request failed: {} - {}",
-            status,
-            error_text
+            "Failed to get release info for {}: {}",
+            repo,
+            response.status()
         ));
     }
 
@@ -76,577 +403,279 @@ pub async fn get_gh_release_info(
     Ok(release)
 }
 
-pub async fn install_or_update_tool(
-    config: &mut ToolerConfig,
-    tool_id_query: &str,
-    force_update: bool,
-    asset_override: Option<&str>,
-) -> Result<PathBuf> {
-    let tool_identifier = ToolIdentifier::parse(tool_id_query)
-        .map_err(|e| anyhow!("Failed to parse tool identifier: {}", e))?;
+pub async fn discover_url_versions(_url: &str) -> Result<Vec<String>> {
+    Ok(vec![])
+}
 
-    let tool_name = tool_identifier.tool_name();
-    let requested_version = tool_identifier.api_version();
-
-    // Prevent installing a tool that would conflict with tooler-shim
-    if tool_name.to_lowercase() == "tooler-shim" {
+pub fn pin_tool(config: &mut ToolerConfig, tool_id: &str) -> Result<()> {
+    let tool_identifier = ToolIdentifier::parse(tool_id).map_err(|e| anyhow!(e))?;
+    if tool_identifier.version.is_none() {
         return Err(anyhow!(
-            "Cannot install tool named 'tooler-shim' as it conflicts with the tooler shim system"
+            "Version must be specified for pinning: tool@version"
         ));
     }
 
-    let system_info = get_system_info();
+    let key = tool_identifier.config_key();
+    if let Some(mut tool_info) = config.tools.remove(&key) {
+        tool_info.pinned = true;
+        let version = tool_info.version.clone();
+        config.tools.insert(key, tool_info.clone());
 
-    let (actual_version, asset_info, original_url, repo_full_name) = match tool_identifier.forge {
-        Forge::GitHub => {
-            let repo = tool_identifier.full_repo();
-            let release_info = get_gh_release_info(&repo, Some(&requested_version)).await?;
-            let version = release_info.tag_name.clone();
-
-            let asset = if let Some(asset_name) = asset_override {
-                let asset = release_info
-                    .assets
-                    .iter()
-                    .find(|a| a.name == asset_name)
-                    .ok_or_else(|| {
-                        anyhow!(
-                            "Specified asset '{}' not found in release assets",
-                            asset_name
-                        )
-                    })?;
-                Some(AssetInfo {
-                    name: asset.name.clone(),
-                    download_url: asset.browser_download_url.clone(),
-                })
-            } else {
-                find_asset_for_platform(
-                    &release_info.assets,
-                    &repo,
-                    &system_info.os,
-                    &system_info.arch,
-                )?
-            };
-
-            let asset = asset.ok_or_else(|| {
-                anyhow!(
-                    "No suitable asset found for {} {} for your platform",
-                    repo,
-                    version
-                )
-            })?;
-
-            (version, asset, None, repo)
+        // Also update @latest entry to point to this pinned version
+        let latest_key = tool_identifier.default_config_key();
+        if let Some(mut latest_tool) = config.tools.remove(&latest_key) {
+            latest_tool.pinned = true;
+            latest_tool.version = tool_info.version.clone();
+            latest_tool.executable_path = tool_info.executable_path.clone();
+            config.tools.insert(latest_key, latest_tool);
         }
-        Forge::Url => {
-            let url = tool_identifier
-                .url
-                .as_ref()
-                .ok_or_else(|| anyhow!("Missing URL for tool"))?;
-            let version = tool_identifier
-                .version
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string());
 
-            let asset = AssetInfo {
-                name: url.split('/').next_back().unwrap_or(&tool_name).to_string(),
-                download_url: url.clone(),
-            };
+        save_tool_configs(config)?;
+        tracing::info!("Tool {} pinned to version {}", tool_id, version);
+        Ok(())
+    } else {
+        Err(anyhow!("Tool {} not found", tool_id))
+    }
+}
 
-            (
-                version,
-                asset,
-                Some(url.clone()),
-                tool_identifier.full_repo(),
-            )
-        }
-    };
+pub fn remove_tool(config: &mut ToolerConfig, key: &str) -> Result<()> {
+    if config.tools.remove(key).is_some() {
+        save_tool_configs(config)?;
+        tracing::info!("Tool {} removed", key);
+        Ok(())
+    } else {
+        Err(anyhow!("Tool {} not found", key))
+    }
+}
 
+#[allow(dead_code)]
+pub(crate) fn find_highest_version<'a>(tools: Vec<&'a ToolInfo>) -> Option<&'a ToolInfo> {
+    tools.into_iter().max_by(|a, b| {
+        let v_a = semver::Version::parse(&a.version.trim_start_matches('v'))
+            .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
+        let v_b = semver::Version::parse(&b.version.trim_start_matches('v'))
+            .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
+        v_a.cmp(&v_b)
+    })
+}
+
+pub fn find_tool_entry<'a>(
+    config: &'a ToolerConfig,
+    tool_query: &str,
+) -> Option<(&'a String, &'a ToolInfo)> {
+    let tool_identifier = ToolIdentifier::parse(tool_query).ok()?;
     let tool_key = tool_identifier.config_key();
 
-    let forge_prefix = match tool_identifier.forge {
-        Forge::GitHub => "github",
-        Forge::Url => "url",
-    };
+    // 1. Try exact match (including version if specified)
+    if tool_identifier.is_pinned() {
+        let requested_version = tool_identifier.version.as_ref().unwrap();
 
-    let tool_install_base_dir = get_tooler_tools_dir()?.join(forge_prefix).join(format!(
-        "{}__{}",
-        repo_full_name.replace('/', "__"),
-        system_info.arch
-    ));
-    // Sanitize version for filesystem use (replace slashes with double underscores)
-    let sanitized_version = actual_version.replace('/', "__");
-    let tool_version_dir = tool_install_base_dir.join(&sanitized_version);
+        if config.tools.get(&tool_key).is_some() {
+            return config.tools.get_key_value(&tool_key);
+        }
 
-    tracing::debug!(
-        "Tool installation base directory: {}",
-        tool_install_base_dir.display()
-    );
-    tracing::debug!("Tool version directory: {}", tool_version_dir.display());
-    tracing::debug!("Looking for tool with key: {}", tool_key);
+        // Semver match for partial versions
+        let matching_tools: Vec<(&String, &ToolInfo)> = config
+            .tools
+            .iter()
+            .filter(|(_, info)| {
+                // Tightened matching: must match repo name or full repo path exactly
+                let name_matches = info.tool_name.to_lowercase()
+                    == tool_identifier.tool_name().to_lowercase()
+                    || info.repo.to_lowercase() == tool_identifier.full_repo().to_lowercase();
 
-    // Check if already installed
-    if !force_update {
-        if let Some(current_info) = config.tools.get(&tool_key) {
-            tracing::debug!("Found tool info: {:?}", current_info);
-            tracing::debug!(
-                "Checking if executable exists at: {}",
-                current_info.executable_path
-            );
-
-            // If asset_override is provided, check if the specific asset exists
-            if let Some(asset_name) = asset_override {
-                let expected_asset_path = tool_version_dir.join(asset_name);
-                if expected_asset_path.exists() {
-                    tracing::info!(
-                        "Tool {} {} is already installed with asset '{}'.",
-                        tool_name,
-                        actual_version,
-                        asset_name
-                    );
-                    return Ok(PathBuf::from(&current_info.executable_path));
-                } else {
-                    tracing::info!(
-                        "Asset '{}' for {} {} not found. Re-downloading...",
-                        asset_name,
-                        tool_name,
-                        actual_version
-                    );
+                if !name_matches {
+                    return false;
                 }
-            } else if Path::new(&current_info.executable_path).exists() {
-                tracing::info!(
-                    "Tool {} {} is already installed.",
-                    tool_name,
-                    actual_version
-                );
-                return Ok(PathBuf::from(&current_info.executable_path));
-            } else {
-                tracing::warn!(
-                    "Installation for {} {} is corrupted. Re-installing.",
-                    tool_name,
-                    actual_version
-                );
-            }
-        } else {
-            tracing::debug!("Tool not found in config with key: {}", tool_key);
+                version_matches(requested_version, &info.version)
+            })
+            .collect();
+
+        if !matching_tools.is_empty() {
+            return matching_tools.into_iter().max_by(|a, b| {
+                let v_a = semver::Version::parse(&a.1.version.trim_start_matches('v'))
+                    .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
+                let v_b = semver::Version::parse(&b.1.version.trim_start_matches('v'))
+                    .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
+                v_a.cmp(&v_b)
+            });
         }
-    }
 
-    eprintln!("Installing/Updating {} {}...", tool_name, actual_version);
-    tracing::info!("Installing/Updating {} {}...", tool_name, actual_version);
-
-    // Create tool install base directory if it doesn't exist
-    fs::create_dir_all(&tool_install_base_dir)?;
-
-    // Create temporary staging directory for atomic-like update
-    let staging_dir = TempDir::new_in(&tool_install_base_dir)?;
-
-    let staging_path = staging_dir.path();
-
-    let (executable_path, install_type) = if asset_info.name.to_lowercase().ends_with(".whl") {
-        let path = install_python_tool(staging_path, &asset_info.name, &tool_name).await?;
-        (path, "python-venv".to_string())
-    } else if asset_info.name.to_lowercase().ends_with(".tar.gz")
-        || asset_info.name.to_lowercase().ends_with(".zip")
-        || asset_info.name.to_lowercase().ends_with(".tar.xz")
-        || asset_info.name.to_lowercase().ends_with(".tgz")
-    {
-        let temp_download_dir = TempDir::new()?;
-        let temp_download_path = temp_download_dir.path().join(&asset_info.name);
-
-        download_file(&asset_info.download_url, &temp_download_path).await?;
-
-        // Cache downloaded file in staging directory
-        let cached_asset_path = staging_path.join(&asset_info.name);
-        fs::copy(&temp_download_path, &cached_asset_path)?;
-
-        let path = extract_archive(
-            &temp_download_path,
-            staging_path,
-            &tool_name,
-            &repo_full_name,
-        )?;
-        (path, "archive".to_string())
+        config.tools.get_key_value(&tool_key)
     } else {
-        // Direct executable
-        let temp_download_dir = TempDir::new()?;
-        let temp_download_path = temp_download_dir.path().join(&asset_info.name);
-
-        download_file(&asset_info.download_url, &temp_download_path).await?;
-
-        // Cache original asset in staging directory
-        let cached_asset_path = staging_path.join(&asset_info.name);
-        fs::copy(&temp_download_path, &cached_asset_path)?;
-
-        let final_binary_name = if system_info.os == "windows" {
-            format!("{}.exe", tool_name)
-        } else {
-            tool_name.to_string()
-        };
-
-        let move_target_path = staging_path.join(final_binary_name);
-        fs::rename(&temp_download_path, &move_target_path)?;
-
-        // Make executable on Unix-like systems
-        if system_info.os != "windows" {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = fs::metadata(&move_target_path)?.permissions();
-                perms.set_mode(0o755);
-                fs::set_permissions(&move_target_path, perms)?;
-            }
-        }
-
-        tracing::info!(
-            "Installed direct executable to: {}",
-            move_target_path.display()
-        );
-        (move_target_path, "binary".to_string())
-    };
-
-    // Clean up existing installation and move staging directory to final location
-    if tool_version_dir.exists() {
-        fs::remove_dir_all(&tool_version_dir)?;
+        // Unqualified name or unpinned: find most recently accessed matching tool
+        config
+            .tools
+            .iter()
+            .filter(|(_, info)| {
+                // Tightened matching
+                info.tool_name.to_lowercase() == tool_identifier.tool_name().to_lowercase()
+                    || info.repo.to_lowercase() == tool_identifier.full_repo().to_lowercase()
+            })
+            .max_by_key(|(_, info)| &info.last_accessed)
     }
-
-    // Create the destination directory parent if it doesn't exist
-    if let Some(parent) = tool_version_dir.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    // Move from staging to final version directory
-    fs::rename(staging_path, &tool_version_dir)?;
-
-    // Update executable path to point to the final location
-    let relative_exec_path = executable_path.strip_prefix(staging_path)?;
-    let final_executable_path = tool_version_dir.join(relative_exec_path);
-
-    let tool_info = ToolInfo {
-        tool_name: tool_name.to_lowercase(),
-        repo: tool_identifier.full_repo(),
-        version: actual_version.trim_start_matches('v').to_string(),
-        executable_path: final_executable_path.to_string_lossy().to_string(),
-        install_type,
-        pinned: tool_identifier.is_pinned(),
-        installed_at: Utc::now().to_rfc3339(),
-        last_accessed: Utc::now().to_rfc3339(),
-        forge: tool_identifier.forge,
-        original_url,
-    };
-
-    config.tools.insert(tool_key, tool_info);
-    save_tool_configs(config)?;
-
-    tracing::info!(
-        "Successfully installed {} {} to {}",
-        tool_name,
-        actual_version,
-        executable_path.display()
-    );
-
-    // Add pinning suggestion if asset was explicitly selected
-    if let Some(asset_name) = asset_override {
-        tracing::info!(
-            "Successfully installed {}@{} using asset '{}'.",
-            repo_full_name,
-            actual_version,
-            asset_name
-        );
-        tracing::info!(
-            "To use this asset by default in the future, run:\n  tooler pin {}@{}",
-            repo_full_name,
-            asset_name
-        );
-    }
-
-    Ok(final_executable_path)
 }
 
-async fn install_python_tool(
-    tool_dir: &Path,
-    wheel_path: &str,
-    tool_name: &str,
-) -> Result<PathBuf> {
-    tracing::info!("Setting up Python environment for {}...", tool_name);
-
-    let venv_path = tool_dir.join(".venv");
-
-    // Create virtual environment
-    let output = Command::new("python3")
-        .args(["-m", "venv", &venv_path.to_string_lossy()])
-        .output()?;
-
-    if !output.status.success() {
-        return Err(anyhow!(
-            "Failed to create virtual environment: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    let pip_exec = if cfg!(windows) {
-        venv_path.join("Scripts").join("pip.exe")
-    } else {
-        venv_path.join("bin").join("pip")
-    };
-
-    // Upgrade pip
-    let output = Command::new(&pip_exec)
-        .args(["install", "--upgrade", "pip"])
-        .output()?;
-
-    if !output.status.success() {
-        return Err(anyhow!(
-            "Failed to upgrade pip: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    // Install wheel
-    tracing::info!("Installing local wheel {}...", wheel_path);
-    let output = Command::new(&pip_exec)
-        .args(["install", wheel_path])
-        .output()?;
-
-    if !output.status.success() {
-        return Err(anyhow!(
-            "Failed to install wheel: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    // Create shim script
-    let shim_path = tool_dir.join(tool_name);
-    let shim_content = if cfg!(windows) {
-        format!(
-            "@echo off\r\n\"%~dp0\\.venv\\Scripts\\{}.exe\" %*\r\n",
-            tool_name
-        )
-    } else {
-        format!(
-            "#!/bin/sh\nexec \"$(dirname \"$0\")/.venv/bin/{}\" \"$@\"\n",
-            tool_name
-        )
-    };
-
-    fs::write(&shim_path, shim_content)?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perms = fs::metadata(&shim_path)?.permissions();
-        perms.set_mode(0o755);
-        fs::set_permissions(&shim_path, perms)?;
-    }
-
-    tracing::info!("Created shim script at: {}", shim_path.display());
-    Ok(shim_path)
-}
-
-pub async fn discover_url_versions(url: &str) -> Result<Vec<String>> {
-    // Attempt to find the "version container" directory
-    // e.g. if url is .../release/v1.31.0/... then container is .../release/
-    let mut container_url = url.to_string();
-    let re_version = regex::Regex::new(r"v?\d+\.\d+\.\d+").unwrap();
-
-    if let Some(m) = re_version.find(url) {
-        let version_str = m.as_str();
-        if let Some(pos) = url.find(version_str) {
-            container_url = url[..pos].to_string();
-        }
-    } else {
-        // If no version in URL, try the parent directory
-        if let Some(pos) = url.rfind('/') {
-            container_url = url[..pos + 1].to_string();
-        }
-    }
-
-    tracing::debug!("Discovering versions in container: {}", container_url);
-
-    let client = reqwest::Client::new();
-    let response = client.get(&container_url).send().await?;
-    let text = response.text().await?;
-
-    let mut versions = Vec::new();
-    // Look for links that look like versions (e.g. v1.2.3/ or 1.2.3/)
-    let re_link = regex::Regex::new(r#"href=["']?v?(\d+\.\d+\.\d+)/?["']?"#)?;
-    for cap in re_link.captures_iter(&text) {
-        versions.push(cap[1].to_string());
-    }
-
-    versions.sort_by(|a, b| {
-        let v_a = semver::Version::parse(a).unwrap_or_else(|_| semver::Version::new(0, 0, 0));
-        let v_b = semver::Version::parse(b).unwrap_or_else(|_| semver::Version::new(0, 0, 0));
-        v_a.cmp(&v_b)
-    });
-    versions.dedup();
-
-    Ok(versions)
-}
 pub fn find_tool_executable<'a>(
     config: &'a ToolerConfig,
     tool_query: &str,
 ) -> Option<&'a ToolInfo> {
-    tracing::debug!("Finding tool executable for query: {}", tool_query);
+    find_tool_entry(config, tool_query).map(|(_, info)| info)
+}
 
-    let tool_identifier = ToolIdentifier::parse(tool_query).ok()?;
-    let tool_key = tool_identifier.config_key();
+pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
+    let tool_id = ToolIdentifier::parse(tool_query).map_err(|e| anyhow!(e))?;
+    let tools_dir = get_tooler_tools_dir()?;
+    let system_info = get_system_info();
+    let tool_name_lower = tool_id.tool_name().to_lowercase();
 
-    tracing::debug!("Parsed tool identifier: {:?}", tool_identifier);
-    tracing::debug!("Looking for tool with key: {}", tool_key);
+    let mut scan_dirs = vec![tools_dir.clone()];
+    for forge in &["github", "url"] {
+        scan_dirs.push(tools_dir.join(forge));
+    }
 
-    if tool_identifier.is_pinned() {
-        // Check if it's an exact version match first
-        if let Some(exact_match) = config.tools.get(&tool_key) {
-            return Some(exact_match);
+    for forge_dir in scan_dirs {
+        if !forge_dir.exists() {
+            continue;
         }
 
-        // If exact match not found, try matching by repo name with any version
-        // This handles cases like @latest when you have a specific version installed
-        let matching_tool = config
-            .tools
-            .values()
-            .find(|info| info.repo.to_lowercase() == tool_identifier.full_repo().to_lowercase());
+        let Ok(entries) = fs::read_dir(&forge_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
 
-        if let Some(exact_match) = matching_tool {
-            tracing::debug!("Found tool by repo match: {}", exact_match.repo);
-            return Some(exact_match);
-        }
+            let dir_name = path.file_name().unwrap_or_default().to_string_lossy();
+            let parts: Vec<&str> = dir_name.split("__").collect();
 
-        // Also try matching by tool name only (last part of repo)
-        let matching_by_name = config.tools.values().find(|info| {
-            info.repo
-                .to_lowercase()
-                .ends_with(&format!("/{}", tool_identifier.tool_name().to_lowercase()))
-                || info.repo.to_lowercase() == tool_identifier.tool_name().to_lowercase()
-        });
+            let (author, repo, arch) = match parts.len() {
+                3 => (parts[0], parts[1], Some(parts[2])),
+                2 => (parts[0], parts[1], None),
+                1 => ("unknown", parts[0], None),
+                _ => continue,
+            };
 
-        if let Some(exact_match) = matching_by_name {
-            tracing::debug!("Found tool by name match: {}", exact_match.repo);
-            return Some(exact_match);
-        }
+            let repo_matches = repo.to_lowercase() == tool_name_lower
+                || tool_id.full_repo().replace("/", "__") == dir_name.as_ref()
+                || tool_id.full_repo() == format!("{}/{}", author, repo);
 
-        // Also try matching by actual executable name
-        let matching_by_exec = config.tools.values().find(|info| {
-            let path = Path::new(&info.executable_path);
-            let file_name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().to_lowercase())
-                .unwrap_or_default();
-            let file_stem = path
-                .file_stem()
-                .map(|n| n.to_string_lossy().to_lowercase())
-                .unwrap_or_default();
-
-            file_name == tool_identifier.tool_name().to_lowercase()
-                || file_stem == tool_identifier.tool_name().to_lowercase()
-        });
-
-        if let Some(exact_match) = matching_by_exec {
-            tracing::debug!("Found tool by executable name match: {}", exact_match.repo);
-            return Some(exact_match);
-        }
-
-        // For backwards compatibility, also check the old : format
-        let old_key = format!(
-            "{}:{}",
-            tool_identifier.full_repo(),
-            tool_identifier.api_version()
-        );
-        if let Some(exact_match) = config.tools.get(&old_key) {
-            return Some(exact_match);
-        }
-
-        // If not found, try semver matching for partial versions
-        if let Some(requested_version) = &tool_identifier.version {
-            let matching_tools: Vec<&'a ToolInfo> = config.tools
-                .values()
-                .filter(|info| {
-                    // Match by tool name/repo first
-                    let name_matches = info.tool_name.to_lowercase() == tool_identifier.tool_name().to_lowercase() ||
-                        (tool_identifier.author != "unknown" &&
-                         info.repo.to_lowercase() == tool_identifier.full_repo().to_lowercase()) ||
-                        info.repo.to_lowercase().ends_with(&format!("/{}", tool_identifier.tool_name().to_lowercase())) ||
-                        info.repo.to_lowercase() == tool_identifier.tool_name().to_lowercase() ||
-                        // Also match by actual executable name
-                        Path::new(&info.executable_path).file_name().map(|n| n.to_string_lossy().to_lowercase()) == Some(tool_identifier.tool_name().to_lowercase()) ||
-                        Path::new(&info.executable_path).file_stem().map(|n| n.to_string_lossy().to_lowercase()) == Some(tool_identifier.tool_name().to_lowercase());
-
-                    tracing::trace!("Name match check for {}: {} (repo: {})",
-                        tool_identifier.tool_name(), name_matches, info.repo);
-
-                    if !name_matches {
-                        return false;
+            if repo_matches {
+                if let Some(a) = arch {
+                    if a != system_info.arch {
+                        continue;
                     }
+                }
 
-                    // Use version field from ToolInfo
-                    version_matches(requested_version, &info.version)
-                })
-                .collect();
+                // Recursively find directories that look like versions
+                let mut version_candidates = Vec::new();
+                let re_version = regex::Regex::new(r"v?\d+\.\d+").unwrap();
 
-            tracing::debug!(
-                "Found {} matching tools for version {}",
-                matching_tools.len(),
-                requested_version
-            );
+                for entry in WalkDir::new(&path).into_iter().filter_map(|e| e.ok()) {
+                    if entry.path().is_dir() {
+                        let name = entry.file_name().to_string_lossy();
+                        if re_version.is_match(&name) {
+                            version_candidates.push((name.to_string(), entry.path().to_path_buf()));
+                        }
+                    }
+                }
 
-            // Return highest version that matches
-            if !matching_tools.is_empty() {
-                return find_highest_version(matching_tools);
+                // If no version-like dir found, try top-level subdirs
+                if version_candidates.is_empty() {
+                    if let Ok(subs) = fs::read_dir(&path) {
+                        for sub in subs.flatten() {
+                            if sub.path().is_dir() {
+                                version_candidates.push((
+                                    sub.file_name().to_string_lossy().to_string(),
+                                    sub.path(),
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                // Sort and pick latest version
+                version_candidates.sort_by(|a, b| {
+                    let v_a = semver::Version::parse(&a.0.trim_start_matches('v'))
+                        .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
+                    let v_b = semver::Version::parse(&b.0.trim_start_matches('v'))
+                        .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
+                    v_a.cmp(&v_b)
+                });
+
+                if let Some((version, ver_path)) = version_candidates.last() {
+                    if let Some(exec_path) = find_executable_in_extracted(
+                        ver_path,
+                        repo,
+                        &format!("{}/{}", author, repo),
+                        &system_info.os,
+                        &PathBuf::new(),
+                    ) {
+                        let clean_version = version.trim_start_matches('v').to_string();
+                        let forge_val = if forge_dir.ends_with("url") {
+                            Forge::Url
+                        } else {
+                            Forge::GitHub
+                        };
+
+                        // Deduce install type
+                        let install_type = if ver_path.join(".venv").exists() {
+                            "python-venv".to_string()
+                        } else {
+                            // Standalone binary or archive?
+                            let file_count = fs::read_dir(ver_path).map(|r| r.count()).unwrap_or(0);
+                            if file_count <= 3 {
+                                // Usually binary, license, readme
+                                "binary".to_string()
+                            } else {
+                                "archive".to_string()
+                            }
+                        };
+
+                        return Ok(Some(ToolInfo {
+                            tool_name: repo.to_lowercase(),
+                            repo: if author == "direct" || author == "unknown" {
+                                repo.to_string()
+                            } else {
+                                format!("{}/{}", author, repo)
+                            },
+                            version: clean_version,
+                            executable_path: exec_path.to_string_lossy().to_string(),
+                            install_type,
+                            pinned: false,
+                            installed_at: Utc::now().to_rfc3339(),
+                            last_accessed: Utc::now().to_rfc3339(),
+                            last_checked: Some(Utc::now().to_rfc3339()),
+                            forge: forge_val,
+                            original_url: None,
+                        }));
+                    }
+                }
             }
         }
-
-        // If no semver match found, try exact match again (for non-semver versions like "master")
-        config.tools.get(&tool_key)
-    } else {
-        // Find matching tools for unpinned queries
-        let matching_tools: Vec<&'a ToolInfo> = config.tools
-            .values()
-            .filter(|info| {
-                // Match by tool name (e.g., "k9s" matches "derailed/k9s")
-                info.tool_name.to_lowercase() == tool_identifier.tool_name().to_lowercase() ||
-                // Match by full repo if specified (e.g., "derailed/k9s" matches "derailed/k9s")
-                (tool_identifier.author != "unknown" &&
-                 info.repo.to_lowercase() == tool_identifier.full_repo().to_lowercase()) ||
-                // Match by repo name alone (e.g., "k9s" matches repo "k9s")
-                info.repo.to_lowercase().ends_with(&format!("/{}", tool_identifier.tool_name().to_lowercase())) ||
-                info.repo.to_lowercase() == tool_identifier.tool_name().to_lowercase() ||
-                // Also match by actual executable name
-                Path::new(&info.executable_path).file_name().map(|n| n.to_string_lossy().to_lowercase()) == Some(tool_identifier.tool_name().to_lowercase()) ||
-                Path::new(&info.executable_path).file_stem().map(|n| n.to_string_lossy().to_lowercase()) == Some(tool_identifier.tool_name().to_lowercase())
-            })
-            .collect();
-
-        tracing::debug!("Found {} matching tools", matching_tools.len());
-
-        // Return the most recently accessed tool
-        matching_tools
-            .into_iter()
-            .max_by_key(|info| &info.last_accessed)
     }
+
+    Ok(None)
 }
 
 pub(crate) fn version_matches(requested: &str, existing: &str) -> bool {
-    // Clean versions (remove 'v' prefix if present)
     let requested_clean = requested.trim_start_matches('v');
     let existing_clean = existing.trim_start_matches('v');
 
-    // If they're exactly the same, it's a match
     if requested_clean == existing_clean {
         return true;
     }
 
-    // Try to parse as semver
     let req_parse = semver::Version::parse(requested_clean);
     let exist_parse = semver::Version::parse(existing_clean);
 
     if let (Ok(req_semver), Ok(exist_semver)) = (req_parse, exist_parse) {
         let req_parts = requested_clean.split('.').count();
-
-        // For partial versions like "1.5", match any 1.5.x
         if req_parts <= 2 {
             req_semver.major == exist_semver.major && req_semver.minor == exist_semver.minor
         } else {
-            // For full versions, exact match
             req_semver == exist_semver
         }
     } else {
@@ -662,138 +691,4 @@ pub(crate) fn version_matches(requested: &str, existing: &str) -> bool {
         // Non-semver versions (like "master", "tip", etc.) - exact match only
         requested_clean == existing_clean
     }
-}
-
-pub(crate) fn find_highest_version(tools: Vec<&ToolInfo>) -> Option<&ToolInfo> {
-    tools.into_iter().max_by(|a, b| {
-        let a_version = &a.version;
-        let b_version = &b.version;
-
-        // Clean versions
-        let a_clean = a_version.trim_start_matches('v');
-        let b_clean = b_version.trim_start_matches('v');
-
-        // Try to compare as semver
-        match (
-            semver::Version::parse(a_clean),
-            semver::Version::parse(b_clean),
-        ) {
-            (Ok(a_semver), Ok(b_semver)) => a_semver.cmp(&b_semver),
-            _ => {
-                // Fall back to string comparison for non-semver versions
-                a_clean.cmp(b_clean)
-            }
-        }
-    })
-}
-
-pub fn pin_tool(config: &mut ToolerConfig, tool_query: &str) -> Result<()> {
-    let tool_identifier =
-        ToolIdentifier::parse(tool_query).map_err(|e| anyhow!("Invalid tool identifier: {}", e))?;
-
-    // Find the tool in config using the exact version key
-    let tool_key = tool_identifier.config_key();
-
-    if let Some(mut tool_info) = config.tools.remove(&tool_key) {
-        // Mark the tool as pinned
-        tool_info.pinned = true;
-        config.tools.insert(tool_key, tool_info.clone());
-
-        // Also update @latest entry to point to this pinned version
-        let latest_key = tool_identifier.default_config_key();
-        if let Some(mut latest_tool) = config.tools.remove(&latest_key) {
-            latest_tool.pinned = true;
-            latest_tool.version = tool_info.version.clone();
-            latest_tool.executable_path = tool_info.executable_path.clone();
-            config.tools.insert(latest_key, latest_tool);
-        }
-
-        save_tool_configs(config)?;
-        tracing::info!(
-            "Successfully pinned {} to version {}",
-            tool_identifier.full_repo(),
-            tool_info.version
-        );
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "Tool '{}' not found. Install it first with 'tooler install {}'",
-            tool_query,
-            tool_query
-        ))
-    }
-}
-
-pub fn remove_tool(config: &mut ToolerConfig, tool_query: &str) -> Result<()> {
-    // Prevent removing tooler-shim
-    if tool_query.to_lowercase() == "tooler-shim" {
-        return Err(anyhow!(
-            "Cannot remove 'tooler-shim' as it is part of the tooler system"
-        ));
-    }
-
-    let tool_identifier =
-        ToolIdentifier::parse(tool_query).map_err(|e| anyhow!("Invalid tool identifier: {}", e))?;
-    let keys_to_remove: Vec<String> = config
-        .tools
-        .keys()
-        .filter(|k| {
-            k.as_str() == tool_identifier.config_key()
-                || (!tool_query.contains('@') && !tool_query.contains(':') && {
-                    let info = &config.tools[k.as_str()];
-                    info.repo.to_lowercase() == tool_query.to_lowercase()
-                })
-        })
-        .cloned()
-        .collect();
-
-    if keys_to_remove.is_empty() {
-        return Err(anyhow!("Tool '{}' not found", tool_query));
-    }
-
-    for key in keys_to_remove {
-        if let Some(info) = config.tools.remove(&key) {
-            // Remove all architecture directories for this tool
-            let forge_prefix = match info.forge {
-                Forge::GitHub => "github",
-                Forge::Url => "url",
-            };
-            let tool_base_dir = get_tooler_tools_dir()?
-                .join(forge_prefix)
-                .join(info.repo.replace('/', "__"));
-
-            // Try to remove the specific version directory first
-            if tool_base_dir.join(&info.version).exists() {
-                tracing::info!(
-                    "Removing directory: {}",
-                    tool_base_dir.join(&info.version).display()
-                );
-                fs::remove_dir_all(tool_base_dir.join(&info.version))?;
-            }
-
-            // Also check for architecture-specific directories
-            if let Ok(entries) = fs::read_dir(tool_base_dir.parent().unwrap_or(&tool_base_dir)) {
-                for entry in entries.flatten() {
-                    let entry_path = entry.path();
-                    if entry_path.is_dir() {
-                        let dir_name = entry_path.file_name().unwrap_or_default().to_string_lossy();
-                        if dir_name.starts_with(&format!("{}__", info.repo.replace('/', "__"))) {
-                            let version_dir = entry_path.join(&info.version);
-                            if version_dir.exists() {
-                                tracing::info!(
-                                    "Removing architecture-specific directory: {}",
-                                    version_dir.display()
-                                );
-                                fs::remove_dir_all(&version_dir)?;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    save_tool_configs(config)?;
-    tracing::info!("Tool(s) for '{}' removed successfully", tool_query);
-    Ok(())
 }

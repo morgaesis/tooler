@@ -23,6 +23,8 @@ pub struct ToolInfo {
     pub installed_at: String,
     pub last_accessed: String,
     #[serde(default)]
+    pub last_checked: Option<String>,
+    #[serde(default)]
     pub forge: Forge,
     #[serde(default)]
     pub original_url: Option<String>,

@@ -123,13 +123,11 @@ impl ToolIdentifier {
     }
 
     /// Get: version string for API calls (adds 'v' prefix if needed)
+    #[allow(dead_code)]
     pub fn api_version(&self) -> String {
         match self.version.as_deref().unwrap_or("default") {
             "default" => "latest".to_string(),
             v => {
-                // Don't modify versions that contain special characters like slashes
-                // or are non-numeric (e.g., "infisical-cli/v0.41.90", "master", "tip")
-                // Also preserve existing 'v' prefixes
                 if v.contains('/')
                     || v.chars().next().is_some_and(|c| !c.is_ascii_digit())
                     || v.starts_with('v')

@@ -12,13 +12,17 @@ use chrono::{DateTime, Utc};
 use clap::{CommandFactory, Parser};
 use cli::{Cli, Commands, ConfigAction};
 use config::{load_tool_configs, normalize_key, save_tool_configs};
-use install::{find_tool_executable, install_or_update_tool, pin_tool, remove_tool};
+use download::is_executable;
+use install::{
+    check_for_updates, find_tool_entry, find_tool_executable, install_or_update_tool,
+    list_installed_tools, pin_tool, remove_tool,
+};
 use std::env;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 use tool_id::ToolIdentifier;
-use types::ToolerSettings;
+use types::{ToolerConfig, ToolerSettings};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -31,6 +35,22 @@ async fn main() -> Result<()> {
     let mut config = load_tool_configs()?;
 
     match cli.command {
+        Commands::External(args) => {
+            if args.is_empty() {
+                Cli::command().print_help()?;
+                return Ok(());
+            }
+            let tool_id = args[0].clone();
+            let tool_args = args[1..].to_vec();
+            execute_run(&mut config, tool_id, tool_args, None).await?;
+        }
+        Commands::Run {
+            tool_id,
+            tool_args,
+            asset,
+        } => {
+            execute_run(&mut config, tool_id, tool_args, asset).await?;
+        }
         Commands::Version => {
             println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
             return Ok(());
@@ -39,25 +59,12 @@ async fn main() -> Result<()> {
             list_installed_tools(&config);
         }
         Commands::Remove { tool_id } => {
-            let tool_identifier = match ToolIdentifier::parse(&tool_id) {
-                Ok(id) => id,
-                Err(e) => {
-                    if tool_id.starts_with('-') {
-                        eprintln!(
-                            "\nError: Invalid tool identifier '{}'. It looks like a flag.",
-                            tool_id
-                        );
-                        eprintln!("Tooler flags (like -v, --quiet) must be placed BEFORE the subcommand: 'tooler {} remove ...'", tool_id);
-                        eprintln!(
-                            "Subcommand flags must be placed AFTER the tool name: 'tooler remove <tool> {}'",
-                            tool_id
-                        );
-                        std::process::exit(1);
-                    }
-                    return Err(anyhow!("Invalid tool identifier: {}", e));
-                }
-            };
-            remove_tool(&mut config, &tool_identifier.config_key())?;
+            let key = find_tool_entry(&config, &tool_id).map(|(k, _)| k.clone());
+            if let Some(key) = key {
+                remove_tool(&mut config, &key)?;
+            } else {
+                return Err(anyhow!("Tool '{}' not found in configuration", tool_id));
+            }
         }
         Commands::Update { tool_id } => {
             if let Some(tool_id) = tool_id {
@@ -72,13 +79,7 @@ async fn main() -> Result<()> {
                         .collect();
                     for key in keys_to_update {
                         if let Some(info) = config.tools.get(&key).cloned() {
-                            match install_or_update_tool(
-                                &mut config,
-                                &info.repo, // Pass the repo or the key
-                                true,
-                                None,
-                            )
-                            .await
+                            match install_or_update_tool(&mut config, &info.repo, true, None).await
                             {
                                 Ok(_) => updated_count += 1,
                                 Err(e) => tracing::warn!("Failed to update {}: {}", info.repo, e),
@@ -90,7 +91,6 @@ async fn main() -> Result<()> {
                         updated_count
                     );
                 } else {
-                    // First find the existing tool to get the correct repo
                     let existing_tool = find_tool_executable(&config, &tool_id);
                     let (repo, tool_identifier) = if let Some(tool_info) = existing_tool {
                         (tool_info.repo.clone(), ToolIdentifier::parse(&tool_id).ok())
@@ -111,14 +111,7 @@ async fn main() -> Result<()> {
                     };
 
                     tracing::info!("Attempting to update {}...", repo);
-                    match install_or_update_tool(
-                        &mut config,
-                        &repo, // Use the stored repo (which is 'direct/kubectl' or similar)
-                        true,
-                        None,
-                    )
-                    .await
-                    {
+                    match install_or_update_tool(&mut config, &repo, true, None).await {
                         Ok(_) => tracing::info!("{} updated successfully", tool_id),
                         Err(e) => {
                             tracing::error!("Failed to update tool '{}': {}", tool_id, e);
@@ -137,11 +130,6 @@ async fn main() -> Result<()> {
                                             "Please check that the repository 'https://github.com/{}' exists.",
                                             repo
                                         );
-                                        if let Some(id) = tool_identifier {
-                                            if id.author == "unknown" {
-                                                eprintln!("\nTip: If you're trying to install a new tool, use the full 'owner/repo' format.");
-                                            }
-                                        }
                                     }
                                     types::Forge::Url => {
                                         eprintln!(
@@ -190,7 +178,6 @@ async fn main() -> Result<()> {
             match install_or_update_tool(&mut config, &tool_id, true, None).await {
                 Ok(path) => {
                     tracing::info!("Successfully pulled {} to {}", tool_id, path.display());
-                    // Create shim if auto_shim is enabled
                     if config.settings.auto_shim && !cfg!(windows) {
                         let bin_dir = &config.settings.bin_dir;
                         create_shim_script(bin_dir)?;
@@ -207,11 +194,6 @@ async fn main() -> Result<()> {
                                     "Please check that the repository 'https://github.com/{}' exists.",
                                     tool_identifier.full_repo()
                                 );
-                                if tool_identifier.author == "unknown" {
-                                    eprintln!(
-                                        "\nTip: If you're trying to install a new tool, use the full 'owner/repo' format."
-                                    );
-                                }
                             }
                             types::Forge::Url => {
                                 eprintln!(
@@ -354,176 +336,6 @@ async fn main() -> Result<()> {
                 }
             }
         },
-        Commands::Run {
-            tool_id,
-            tool_args,
-            asset,
-        } => {
-            let tool_identifier = match ToolIdentifier::parse(&tool_id) {
-                Ok(id) => id,
-                Err(_) => {
-                    if tool_id.starts_with('-') {
-                        // If it's -h or --help, let's show the subcommand help
-                        if tool_id == "-h" || tool_id == "--help" {
-                            let mut cmd = Cli::command();
-                            let sub_help = cmd
-                                .get_subcommands_mut()
-                                .find(|s| s.get_name() == "run")
-                                .map(|s| s.render_help());
-
-                            if let Some(help) = sub_help {
-                                println!("{}", help);
-                                std::process::exit(0);
-                            }
-                        }
-                        eprintln!(
-                            "\nError: Invalid tool identifier '{}'. It looks like a flag.",
-                            tool_id
-                        );
-                        eprintln!("Tooler flags (like -v, --quiet) must be placed BEFORE the subcommand: 'tooler {} run ...'", tool_id);
-                        eprintln!(
-                            "Subcommand flags must be placed AFTER the tool name: 'tooler run <tool> {}'",
-                            tool_id
-                        );
-                        std::process::exit(1);
-                    }
-                    return Err(anyhow!("Invalid tool identifier: {}", tool_id));
-                }
-            };
-            // Check for updates if not a pinned version
-            if !tool_identifier.is_pinned() {
-                check_for_updates(&mut config).await?;
-            }
-            let mut tool_info = find_tool_executable(&config, &tool_id);
-            // Install if not found or if asset override is used
-            if tool_info.is_none() || asset.is_some() {
-                if tool_info.is_none() {
-                    tracing::info!(
-                        "Tool {} not found locally or is corrupted. Attempting to install...",
-                        tool_id
-                    );
-                }
-                match install_or_update_tool(&mut config, &tool_id, false, asset.as_deref()).await {
-                    Ok(_) => {
-                        config = load_tool_configs()?; // Reload config
-                        tool_info = find_tool_executable(&config, &tool_id);
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to install tool '{}': {}", tool_id, e);
-                        if e.to_string().contains("404") {
-                            match tool_identifier.forge {
-                                types::Forge::GitHub => {
-                                    eprintln!("\nError: Tool '{}' not found on GitHub.", tool_id);
-                                    eprintln!(
-                                        "Please check that the repository 'https://github.com/{}' exists.",
-                                        tool_identifier.full_repo()
-                                    );
-                                    if tool_identifier.author == "unknown" {
-                                        eprintln!(
-                                            "\nTip: If you're trying to install a new tool, use the full 'owner/repo' format."
-                                        );
-                                    }
-                                }
-                                types::Forge::Url => {
-                                    eprintln!(
-                                        "\nError: Tool '{}' (URL) not found or returned 404.",
-                                        tool_id
-                                    );
-                                    if let Some(url) = &tool_identifier.url {
-                                        eprintln!("Please check that the URL '{}' is valid.", url);
-                                    }
-                                }
-                            }
-                        } else {
-                            eprintln!("\nError: {}", e);
-                        }
-                        std::process::exit(1);
-                    }
-                }
-            }
-            if let Some(info) = tool_info {
-                // Show tool age with update reason
-                match info.last_accessed.parse::<DateTime<Utc>>() {
-                    Ok(last_accessed) => {
-                        let now = Utc::now();
-                        let duration = now - last_accessed;
-                        let days_since_update = duration.num_days();
-                        let hours = duration.num_hours() % 24;
-                        let minutes = duration.num_minutes() % 60;
-                        let seconds = duration.num_seconds() % 60;
-                        let is_pinned_version = info.version != "latest"
-                            && !info.version.to_lowercase().contains("latest");
-
-                        if is_pinned_version {
-                            tracing::info!(
-                                "{} is {} days old ({}h {}m {}s)",
-                                info.repo,
-                                days_since_update,
-                                hours,
-                                minutes,
-                                seconds
-                            );
-                            if days_since_update > config.settings.update_check_days as i64 {
-                                tracing::info!("Tool is version-pinned and not auto-updated");
-                            }
-                        } else {
-                            tracing::info!(
-                                "{} is {} days old ({}h {}m {}s)",
-                                info.repo,
-                                days_since_update,
-                                hours,
-                                minutes,
-                                seconds
-                            );
-                        }
-                    }
-                    Err(_) => {
-                        tracing::info!("{} age: unknown", info.repo);
-                    }
-                }
-                // Create shim if auto_shim is enabled
-                if config.settings.auto_shim && !cfg!(windows) {
-                    let bin_dir = &config.settings.bin_dir;
-                    create_shim_script(bin_dir)?;
-                    create_tool_symlink(bin_dir, &tool_identifier.tool_name())?;
-                }
-                // Update last accessed time
-                let key = tool_identifier.config_key();
-                let executable_path = info.executable_path.clone();
-                // Update config in separate scope
-                {
-                    if let Some(tool_info) = config.tools.get_mut(&key) {
-                        tool_info.last_accessed = Utc::now().to_rfc3339();
-                        save_tool_configs(&config)?;
-                    }
-                }
-                // Execute tool
-                let mut cmd = Command::new(&executable_path);
-                cmd.args(&tool_args);
-                tracing::debug!("Executing: {:?} {:?}", executable_path, tool_args);
-                let mut child = cmd.spawn().map_err(|e| {
-                    if e.raw_os_error() == Some(8) {
-                        anyhow!(
-                            "Failed to execute '{}': Exec format error.\n\n\
-                            This often happens if:\n\
-                            1. The file is a script or installer, not a binary.\n\
-                            2. The binary was built for a different CPU architecture.\n\
-                            3. The file is a directory or archive that wasn't extracted correctly.\n\n\
-                            Check the file type with 'file {}'",
-                            executable_path,
-                            executable_path
-                        )
-                    } else {
-                        anyhow!("Failed to execute tool: {}", e)
-                    }
-                })?;
-                let status = child.wait()?;
-                std::process::exit(status.code().unwrap_or(1));
-            } else {
-                tracing::error!("Failed to find or install executable for {}", tool_id);
-                std::process::exit(1);
-            }
-        }
         Commands::Pin { tool_id } => {
             pin_tool(&mut config, &tool_id)?;
         }
@@ -552,6 +364,203 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+async fn execute_run(
+    config: &mut ToolerConfig,
+    tool_id: String,
+    tool_args: Vec<String>,
+    asset: Option<String>,
+) -> Result<()> {
+    let tool_identifier = match ToolIdentifier::parse(&tool_id) {
+        Ok(id) => id,
+        Err(_) => {
+            if tool_id.starts_with('-') {
+                if tool_id == "-h" || tool_id == "--help" {
+                    let mut cmd = Cli::command();
+                    let sub_help = cmd
+                        .get_subcommands_mut()
+                        .find(|s| s.get_name() == "run")
+                        .map(|s| s.render_help());
+
+                    if let Some(help) = sub_help {
+                        println!("{}", help);
+                        std::process::exit(0);
+                    }
+                }
+                eprintln!(
+                    "\nError: Invalid tool identifier '{}'. It looks like a flag.",
+                    tool_id
+                );
+                eprintln!("Tooler flags (like -v, --quiet) must be placed BEFORE the subcommand: 'tooler {} run ...'", tool_id);
+                eprintln!(
+                    "Subcommand flags must be placed AFTER the tool name: 'tooler run <tool> {}'",
+                    tool_id
+                );
+                std::process::exit(1);
+            }
+            return Err(anyhow!("Invalid tool identifier: {}", tool_id));
+        }
+    };
+
+    // Check for updates if not a pinned version
+    if !tool_identifier.is_pinned() {
+        check_for_updates(config).await?;
+    }
+
+    let mut tool_info = find_tool_executable(config, &tool_id);
+
+    // Validate tool_info if found
+    if let Some(info) = tool_info {
+        let path = Path::new(&info.executable_path);
+        if !path.exists() || !is_executable(path, &platform::get_system_info().os) {
+            tracing::warn!(
+                "Tool {} found in config but executable is missing or invalid. Attempting recovery...",
+                tool_id
+            );
+            tool_info = None;
+        }
+    }
+
+    // Recovery: If tool not found in config, try to discover it locally
+    if tool_info.is_none() && asset.is_none() {
+        if let Ok(Some(recovered)) = install::try_recover_tool(&tool_id) {
+            eprintln!(
+                "Recovered tool {} (v{}) from local installation.",
+                tool_id, recovered.version
+            );
+            let key = ToolIdentifier::parse(&recovered.repo)
+                .map_err(|e| anyhow!(e))?
+                .config_key();
+            config.tools.insert(key, recovered);
+            save_tool_configs(config)?;
+            tool_info = find_tool_executable(config, &tool_id);
+        }
+    }
+
+    // Install if not found or if asset override is used
+    if tool_info.is_none() || asset.is_some() {
+        if tool_info.is_none() {
+            tracing::info!(
+                "Tool {} not found locally or is corrupted. Attempting to install...",
+                tool_id
+            );
+        }
+        match install_or_update_tool(config, &tool_id, false, asset.as_deref()).await {
+            Ok(_) => {
+                *config = load_tool_configs()?; // Reload config
+                tool_info = find_tool_executable(config, &tool_id);
+            }
+            Err(e) => {
+                tracing::error!("Failed to install tool '{}': {}", tool_id, e);
+                if e.to_string().contains("404") {
+                    match tool_identifier.forge {
+                        types::Forge::GitHub => {
+                            eprintln!("\nError: Tool '{}' not found on GitHub.", tool_id);
+                            eprintln!(
+                                "Please check that the repository 'https://github.com/{}' exists.",
+                                tool_identifier.full_repo()
+                            );
+                        }
+                        types::Forge::Url => {
+                            eprintln!(
+                                "\nError: Tool '{}' (URL) not found or returned 404.",
+                                tool_id
+                            );
+                            if let Some(url) = &tool_identifier.url {
+                                eprintln!("Please check that the URL '{}' is valid.", url);
+                            }
+                        }
+                    }
+                } else {
+                    eprintln!("\nError: {}", e);
+                }
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if let Some(info) = tool_info {
+        // Show tool age
+        if let Ok(installed_at) = info.installed_at.parse::<DateTime<Utc>>() {
+            let now = Utc::now();
+            let duration = now - installed_at;
+            let days_since_install = duration.num_days();
+            let hours = duration.num_hours() % 24;
+            let minutes = duration.num_minutes() % 60;
+            let seconds = duration.num_seconds() % 60;
+            let is_pinned_version =
+                info.version != "latest" && !info.version.to_lowercase().contains("latest");
+
+            if is_pinned_version {
+                tracing::info!(
+                    "{} is {} days old ({}h {}m {}s)",
+                    info.repo,
+                    days_since_install,
+                    hours,
+                    minutes,
+                    seconds
+                );
+                if days_since_install > config.settings.update_check_days as i64 {
+                    tracing::info!("Tool is version-pinned and not auto-updated");
+                }
+            } else {
+                tracing::info!(
+                    "{} is {} days old ({}h {}m {}s)",
+                    info.repo,
+                    days_since_install,
+                    hours,
+                    minutes,
+                    seconds
+                );
+            }
+        }
+
+        // Create shim if auto_shim is enabled
+        if config.settings.auto_shim && !cfg!(windows) {
+            let bin_dir = &config.settings.bin_dir;
+            create_shim_script(bin_dir)?;
+            create_tool_symlink(bin_dir, &tool_identifier.tool_name())?;
+        }
+
+        // Update last accessed time
+        let repo_to_match = info.repo.clone();
+        let version_to_match = info.version.clone();
+        let executable_path = info.executable_path.clone();
+
+        {
+            if let Some(found_info) = config
+                .tools
+                .values_mut()
+                .find(|t| t.repo == repo_to_match && t.version == version_to_match)
+            {
+                found_info.last_accessed = Utc::now().to_rfc3339();
+                save_tool_configs(config)?;
+            }
+        }
+
+        // Execute tool
+        let mut cmd = Command::new(&executable_path);
+        cmd.args(&tool_args);
+        tracing::debug!("Executing: {:?} {:?}", executable_path, tool_args);
+        let mut child = cmd.spawn().map_err(|e| {
+            if e.raw_os_error() == Some(8) {
+                anyhow!(
+                    "Failed to execute '{}': Exec format error.\n\n\
+                    Check the file type with 'file {}'",
+                    executable_path,
+                    executable_path
+                )
+            } else {
+                anyhow!("Failed to execute tool: {}", e)
+            }
+        })?;
+        let status = child.wait()?;
+        std::process::exit(status.code().unwrap_or(1));
+    }
+
+    tracing::error!("Failed to find or install executable for {}", tool_id);
+    std::process::exit(1);
+}
+
 fn setup_logging(cli: &Cli) -> Result<()> {
     use tracing_subscriber::{fmt, EnvFilter};
 
@@ -565,7 +574,6 @@ fn setup_logging(cli: &Cli) -> Result<()> {
         "debug"
     };
 
-    // Support LOG_LEVEL and TOOLER_LOG_LEVEL
     let filter = EnvFilter::try_from_default_env()
         .or_else(|_| {
             let env_val = std::env::var("TOOLER_LOG_LEVEL")
@@ -585,228 +593,6 @@ fn setup_logging(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-fn list_installed_tools(config: &types::ToolerConfig) {
-    use console::style;
-    println!("--- Installed Tooler Tools ---");
-    if config.tools.is_empty() {
-        println!("  No tools installed yet.");
-        return;
-    }
-
-    let mut tools: Vec<_> = config.tools.values().collect();
-    tools.sort_by_key(|t| &t.repo);
-
-    let now = Utc::now();
-
-    for info in tools {
-        let pin_status = if info.pinned { "📌 " } else { "" };
-        let install_type_emoji = match info.install_type.as_str() {
-            "archive" => "📦",
-            "binary" => "🚀",
-            "python-venv" => "🐍",
-            _ => "🛠️",
-        };
-
-        // Extract architecture from path if possible
-        let arch = if info.executable_path.contains("__") {
-            info.executable_path
-                .split("__")
-                .nth(2)
-                .and_then(|s| s.split('/').next())
-                .unwrap_or("unknown")
-        } else {
-            "unknown"
-        };
-
-        // Calculate age and eligibility
-        let (age_str, is_eligible) = match info.installed_at.parse::<DateTime<Utc>>() {
-            Ok(installed_at) => {
-                let duration = now - installed_at;
-                let days = duration.num_days();
-                let s = if days > 0 {
-                    format!("{}d", days)
-                } else if duration.num_hours() > 0 {
-                    format!("{}h", duration.num_hours())
-                } else {
-                    format!("{}m", duration.num_minutes())
-                };
-                let eligible = days >= config.settings.update_check_days as i64;
-                (s, eligible)
-            }
-            Err(_) => ("unknown".to_string(), false),
-        };
-
-        let age_colored = if is_eligible {
-            style(&age_str).red().bold()
-        } else {
-            style(&age_str).green()
-        };
-
-        let update_note = if is_eligible && !info.pinned {
-            format!(" {}", style("(! stale)").yellow().italic())
-        } else {
-            "".to_string()
-        };
-
-        let forge_emoji = match info.forge {
-            types::Forge::GitHub => "🐙",
-            types::Forge::Url => "🔗",
-        };
-
-        println!(
-            "  - {} ({}) {}{}{}[{} | {} | {}]{}",
-            info.repo,
-            info.version,
-            forge_emoji,
-            pin_status,
-            install_type_emoji,
-            info.install_type,
-            arch,
-            age_colored,
-            update_note
-        );
-        println!("    Path:    {}\n", info.executable_path);
-    }
-    println!("------------------------------");
-}
-
-async fn check_for_updates(config: &mut types::ToolerConfig) -> Result<()> {
-    if config.settings.update_check_days <= 0 {
-        return Ok(());
-    }
-
-    tracing::info!(
-        "Checking for tools not updated in >{} days...",
-        config.settings.update_check_days
-    );
-    let now = Utc::now();
-    let mut updates_found = Vec::new();
-    let mut keys_to_update = Vec::new();
-    let mut tools_to_auto_update = Vec::new();
-
-    // 1. Identify tools that need checking (all unpinned tools)
-    let stale_tools: Vec<(String, String, String, String)> = config
-        .tools
-        .iter()
-        .filter_map(|(key, info)| {
-            if info.pinned {
-                return None;
-            }
-            if let Ok(last_accessed) = info.last_accessed.parse::<DateTime<Utc>>() {
-                let days_since_update = (now - last_accessed).num_days();
-                if days_since_update > config.settings.update_check_days as i64 {
-                    return Some((
-                        key.clone(),
-                        info.tool_name.clone(),
-                        info.repo.clone(),
-                        info.version.clone(),
-                    ));
-                }
-            }
-            None
-        })
-        .collect();
-
-    if stale_tools.is_empty() {
-        tracing::info!("No stale unpinned tools found to check for updates.");
-        return Ok(());
-    }
-
-    // 2. Check for updates (does not borrow config)
-    for (key, name, repo, version) in stale_tools {
-        let tool_info = config.tools.get(&key).unwrap();
-
-        match tool_info.forge {
-            types::Forge::GitHub => {
-                tracing::info!(
-                    "Checking for GitHub update for {} (current: {})...",
-                    repo,
-                    version
-                );
-                if let Ok(release) = install::get_gh_release_info(&repo, Some("latest")).await {
-                    let current_clean = version.trim_start_matches('v');
-                    let latest_clean = release.tag_name.trim_start_matches('v');
-
-                    if latest_clean != current_clean {
-                        if config.settings.auto_update {
-                            tools_to_auto_update.push((name, repo.clone(), release.tag_name));
-                        } else {
-                            updates_found.push(format!(
-                                "Tool {} ({}) has update: {} -> {}",
-                                name, repo, version, release.tag_name
-                            ));
-                        }
-                    }
-                    keys_to_update.push(key);
-                } else {
-                    tracing::warn!(
-                        "Could not get latest release for {} during update check",
-                        repo
-                    );
-                }
-            }
-            types::Forge::Url => {
-                if let Some(url) = &tool_info.original_url {
-                    tracing::info!("Checking for URL update for {} at {}...", name, url);
-                    if let Ok(versions) = install::discover_url_versions(url).await {
-                        if let Some(latest) = versions.last() {
-                            let current_clean = version.trim_start_matches('v');
-                            let latest_clean = latest.trim_start_matches('v');
-
-                            if latest_clean != current_clean {
-                                let new_url = url.replace(version.as_str(), latest);
-                                if config.settings.auto_update {
-                                    tools_to_auto_update.push((name, new_url, latest.clone()));
-                                } else {
-                                    updates_found.push(format!(
-                                        "Tool {} (URL) has update: {} -> {} (URL: {})",
-                                        name, version, latest, new_url
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                    keys_to_update.push(key);
-                }
-            }
-        }
-    }
-
-    // 3. Perform auto-updates (mutably borrows config)
-    if !tools_to_auto_update.is_empty() {
-        eprintln!(
-            "Auto-updating {} stale tools...",
-            tools_to_auto_update.len()
-        );
-    }
-    for (_name, repo, version) in tools_to_auto_update {
-        tracing::info!("Auto-updating {} to {}...", repo, version);
-        match install_or_update_tool(config, &repo, true, None).await {
-            Ok(_) => tracing::info!("{} auto-updated successfully", repo),
-            Err(e) => tracing::error!("Failed to auto-update {}: {}", repo, e),
-        }
-    }
-
-    // 4. Update last_accessed timestamps for all checked tools
-    for key in keys_to_update {
-        if let Some(tool_info) = config.tools.get_mut(&key) {
-            tool_info.last_accessed = now.to_rfc3339();
-        }
-    }
-
-    if !updates_found.is_empty() {
-        save_tool_configs(config)?;
-        eprintln!("\n--- Tool Updates Available ---");
-        for msg in updates_found {
-            eprintln!("  {}", msg);
-        }
-        eprintln!("To update, run `tooler update [repo/tool]` or `tooler update all`.");
-        eprintln!("----------------------------\n");
-    }
-
-    Ok(())
-}
-
 fn create_shim_script(bin_dir: &str) -> Result<()> {
     let shim_path = Path::new(bin_dir).join("tooler-shim");
     if !shim_path.exists() {
@@ -822,13 +608,11 @@ fn create_shim_script(bin_dir: &str) -> Result<()> {
             perms.set_mode(0o755);
             fs::set_permissions(&shim_path, perms)?;
         }
-
         tracing::info!("Created shim script at {}", shim_path.display());
     } else {
         // Verify existing shim is a script, not a binary
         if let Ok(metadata) = fs::metadata(&shim_path) {
             if metadata.is_file() {
-                // Check if it's a script by reading first few bytes
                 if let Ok(content) = fs::read_to_string(&shim_path) {
                     if !content.starts_with("#!/bin/bash") {
                         tracing::warn!("tooler-shim exists but is not a script. Recreating...");
@@ -854,7 +638,6 @@ fn create_tool_symlink(bin_dir: &str, tool_name: &str) -> Result<()> {
     let shim_path = Path::new(bin_dir).join("tooler-shim");
     let symlink_path = Path::new(bin_dir).join(tool_name);
 
-    // Don't create symlink for tooler-shim itself
     if tool_name == "tooler-shim" {
         return Ok(());
     }
