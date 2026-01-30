@@ -527,7 +527,6 @@ pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
     let tool_id = ToolIdentifier::parse(tool_query).map_err(|e| anyhow!(e))?;
     let tools_dir = get_tooler_tools_dir()?;
     let system_info = get_system_info();
-    let tool_name_lower = tool_id.tool_name().to_lowercase();
 
     let mut scan_dirs = vec![tools_dir.clone()];
     for forge in &["github", "url"] {
@@ -558,13 +557,22 @@ pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
                 _ => continue,
             };
 
-            let repo_matches = repo.to_lowercase() == tool_name_lower
-                || tool_id.full_repo().replace("/", "__") == dir_name.as_ref()
-                || tool_id.full_repo() == format!("{}/{}", author, repo);
+            // Stricter directory name matching
+            let expected_dir_name = format!("{}__{}__{}", tool_id.author, tool_id.tool_name(), system_info.arch);
+            let legacy_dir_name = format!("{}__{}", tool_id.author, tool_id.tool_name());
+            
+            let name_matches = dir_name == expected_dir_name || dir_name == legacy_dir_name;
 
-            if repo_matches {
+            if name_matches {
+                // If arch is present in directory name, it MUST match
                 if let Some(a) = arch {
                     if a != system_info.arch {
+                        tracing::debug!(
+                            "Directory {} architecture mismatch: {} != {}",
+                            dir_name,
+                            a,
+                            system_info.arch
+                        );
                         continue;
                     }
                 }
@@ -613,6 +621,17 @@ pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
                         &system_info.os,
                         &PathBuf::new(),
                     ) {
+                        // Double check architecture of the recovered binary
+                        if let Ok(false) =
+                            crate::platform::check_binary_architecture(&exec_path)
+                        {
+                            tracing::debug!(
+                                "Recovered binary {} has mismatched architecture, skipping",
+                                exec_path.display()
+                            );
+                            continue;
+                        }
+
                         let clean_version = version.trim_start_matches('v').to_string();
                         let forge_val = if forge_dir.ends_with("url") {
                             Forge::Url

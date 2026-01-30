@@ -1,4 +1,4 @@
-use crate::platform::get_system_info;
+use crate::platform::{check_binary_architecture, get_system_info};
 use anyhow::{anyhow, Result};
 use flate2::read::GzDecoder;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -225,6 +225,16 @@ pub fn find_executable_in_extracted(
                 score += 70;
             }
 
+            // Architecture verification
+            if let Ok(arch_match) = check_binary_architecture(path) {
+                if arch_match {
+                    score += 50;
+                } else {
+                    tracing::debug!("Architecture mismatch for {}, penalizing", path.display());
+                    score -= 500; // Stronger penalty for architecture mismatch
+                }
+            }
+
             // General fuzzy match with tool name
             if file_name.contains(&tool_name_lower) {
                 score += 30;
@@ -251,6 +261,9 @@ pub fn find_executable_in_extracted(
             path.display(),
             score
         );
+        if *score <= 0 {
+            return None;
+        }
     }
 
     candidates.into_iter().map(|(_, path)| path).next()
@@ -258,6 +271,19 @@ pub fn find_executable_in_extracted(
 
 pub fn is_executable(filepath: &Path, os_system: &str) -> bool {
     if !filepath.is_file() {
+        return false;
+    }
+
+    let file_name = filepath
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+
+    // Skip common non-executable files that might have exec bit set (e.g. from archives)
+    if matches!(
+        file_name.as_str(),
+        "license" | "license.txt" | "readme" | "readme.md" | "copying" | "changelog"
+    ) {
         return false;
     }
 

@@ -77,17 +77,7 @@ pub fn find_asset_for_platform(
         }
     }
 
-    let priority_order = vec![
-        "os_arch_archive",
-        "os_arch_binary",
-        "os_arch_package",
-        "os_only_archive",
-        "os_only_binary",
-        "os_only_package",
-        "arch_only_archive",
-        "arch_only_binary",
-        "arch_only_package",
-    ];
+    let priority_order = vec!["os_arch_archive", "os_arch_binary", "os_arch_package"];
 
     for category in priority_order {
         if let Some(asset_list) = candidates.remove(category) {
@@ -101,19 +91,22 @@ pub fn find_asset_for_platform(
                     });
 
                     let arch_match = arch_aliases.iter().any(|(arch, aliases)| {
-                        arch == &system_arch
-                            && aliases.iter().any(|alias| {
-                                if !name_lower.contains(alias) {
-                                    return false;
-                                }
+                        if arch != &system_arch {
+                            return false;
+                        }
 
-                                // Special handling for "arm" to avoid matching "arm64"
-                                if alias == &"arm" && name_lower.contains("arm64") {
-                                    return false;
-                                }
+                        aliases.iter().any(|alias| {
+                            if !name_lower.contains(alias) {
+                                return false;
+                            }
 
-                                true
-                            })
+                            // Special handling for "arm" to avoid matching "arm64"
+                            if alias == &"arm" && name_lower.contains("arm64") {
+                                return false;
+                            }
+
+                            true
+                        })
                     });
 
                     tracing::trace!(
@@ -264,7 +257,7 @@ fn categorize_assets(
     candidates
 }
 
-fn is_musl_system() -> bool {
+pub fn is_musl_system() -> bool {
     #[cfg(target_os = "linux")]
     {
         if let Ok(output) = std::process::Command::new("ldd").arg("--version").output() {
@@ -281,5 +274,50 @@ fn is_musl_system() -> bool {
     #[cfg(not(target_os = "linux"))]
     {
         false
+    }
+}
+
+pub fn check_binary_architecture(path: &std::path::Path) -> Result<bool> {
+    let system_arch = std::env::consts::ARCH;
+
+    #[cfg(unix)]
+    {
+        use std::io::Read;
+        let mut file = std::fs::File::open(path)?;
+        let mut magic = [0u8; 4];
+        if file.read_exact(&mut magic).is_err() {
+            return Ok(true); // Can't read magic, assume it's okay (might be a script)
+        }
+
+        // ELF header (Linux)
+        if magic == [0x7f, 0x45, 0x4c, 0x46] {
+            let mut full_header = vec![0u8; 64];
+            file = std::fs::File::open(path)?; // Re-open to read from start
+            file.read_exact(&mut full_header)?;
+
+            let machine = u16::from_le_bytes([full_header[18], full_header[19]]);
+            match system_arch {
+                "x86_64" => Ok(machine == 0x3E),  // EM_X86_64
+                "aarch64" => Ok(machine == 0xB7), // EM_AARCH64
+                _ => Ok(true),                    // Unknown system arch, skip check
+            }
+        }
+        // Mach-O header (macOS)
+        else if magic == [0xca, 0xfe, 0xba, 0xbe]
+            || magic == [0xce, 0xfa, 0xed, 0xfe]
+            || magic == [0xcf, 0xfa, 0xed, 0xfe]
+        {
+            // Universal binary or Mach-O
+            // For now, assume macOS handles its own compatibility (Rosetta) or we don't strictly enforce
+            Ok(true)
+        } else {
+            // Not a binary we recognize (likely a script), assume okay
+            Ok(true)
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows or other - for now assume true as we mostly target Linux/macOS for this check
+        Ok(true)
     }
 }
