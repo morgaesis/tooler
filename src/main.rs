@@ -56,6 +56,11 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Commands::List => {
+            if let Ok(count) = install::recover_all_installed_tools(&mut config) {
+                if count > 0 {
+                    tracing::info!("Recovered {} tools from local installation", count);
+                }
+            }
             list_installed_tools(&config);
         }
         Commands::Remove { tool_id } => {

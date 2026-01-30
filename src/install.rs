@@ -448,6 +448,77 @@ pub fn remove_tool(config: &mut ToolerConfig, key: &str) -> Result<()> {
     }
 }
 
+pub fn recover_all_installed_tools(config: &mut ToolerConfig) -> Result<usize> {
+    let tools_dir = get_tooler_tools_dir()?;
+    let mut recovered_count = 0;
+
+    let mut scan_dirs = vec![tools_dir.clone()];
+    for forge in &["github", "url"] {
+        scan_dirs.push(tools_dir.join(forge));
+    }
+
+    let mut discovered_queries = std::collections::HashSet::new();
+
+    for forge_dir in scan_dirs {
+        if !forge_dir.exists() {
+            continue;
+        }
+
+        let Ok(entries) = fs::read_dir(&forge_dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+
+            let dir_name = path.file_name().unwrap_or_default().to_string_lossy();
+            let parts: Vec<&str> = dir_name.split("__").collect();
+
+            let (author, repo) = match parts.len() {
+                3 | 2 => (parts[0], parts[1]),
+                1 => ("unknown", parts[0]),
+                _ => continue,
+            };
+
+            let query = if author == "unknown" || author == "direct" {
+                repo.to_string()
+            } else {
+                format!("{}/{}", author, repo)
+            };
+            discovered_queries.insert(query);
+        }
+    }
+
+    for query in discovered_queries {
+        if let Ok(Some(recovered)) = try_recover_tool(&query) {
+            let tool_id = match ToolIdentifier::parse(&recovered.repo) {
+                Ok(id) => id,
+                Err(_) => continue,
+            };
+            let key = tool_id.config_key();
+
+            // Only add if not already present or if version is different
+            let should_add = match config.tools.get(&key) {
+                Some(existing) => existing.version != recovered.version,
+                None => true,
+            };
+
+            if should_add {
+                config.tools.insert(key, recovered);
+                recovered_count += 1;
+            }
+        }
+    }
+
+    if recovered_count > 0 {
+        crate::config::save_tool_configs(config)?;
+    }
+
+    Ok(recovered_count)
+}
+
 #[allow(dead_code)]
 pub(crate) fn find_highest_version<'a>(tools: Vec<&'a ToolInfo>) -> Option<&'a ToolInfo> {
     tools.into_iter().max_by(|a, b| {

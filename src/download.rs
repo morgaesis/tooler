@@ -236,7 +236,7 @@ pub fn find_executable_in_extracted(
             }
 
             // General fuzzy match with tool name
-            if file_name.contains(&tool_name_lower) {
+            if file_name.contains(&tool_name_lower) || tool_name_lower.contains(&file_stem) {
                 score += 30;
             }
 
@@ -282,20 +282,55 @@ pub fn is_executable(filepath: &Path, os_system: &str) -> bool {
     // Skip common non-executable files that might have exec bit set (e.g. from archives)
     if matches!(
         file_name.as_str(),
-        "license" | "license.txt" | "readme" | "readme.md" | "copying" | "changelog"
+        "license"
+            | "license.txt"
+            | "readme"
+            | "readme.md"
+            | "copying"
+            | "changelog"
+            | "changelog.md"
+            | "install"
+            | "uninstall"
+    ) {
+        return false;
+    }
+
+    let ext = filepath
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    // Skip documents and source files that are clearly not the main binary
+    if matches!(
+        ext.as_str(),
+        "md" | "txt" | "json" | "xml" | "yaml" | "yml" | "html" | "css" | "png" | "jpg" | "gif" | "svg"
     ) {
         return false;
     }
 
     if os_system == "windows" {
-        let ext = filepath.extension().and_then(|s| s.to_str()).unwrap_or("");
-        matches!(ext.to_lowercase().as_str(), "exe" | "cmd" | "bat")
+        matches!(ext.as_str(), "exe" | "cmd" | "bat")
     } else {
         // On Unix-like systems, check if it's a regular file and not a library/archive
-        let ext = filepath.extension().and_then(|s| s.to_str()).unwrap_or("");
-        !matches!(
-            ext.to_lowercase().as_str(),
-            "dll" | "so" | "dylib" | "gz" | "zip" | "tar" | "xz" | "tgz"
-        )
+        if matches!(
+            ext.as_str(),
+            "dll" | "so" | "dylib" | "gz" | "zip" | "tar" | "xz" | "tgz" | "deb" | "rpm" | "apk"
+        ) {
+            return false;
+        }
+
+        // Check execution bit on Unix
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(metadata) = filepath.metadata() {
+                if metadata.permissions().mode() & 0o111 == 0 {
+                    return false;
+                }
+            }
+        }
+
+        true
     }
 }
