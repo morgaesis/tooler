@@ -170,3 +170,72 @@ impl fmt::Display for ToolIdentifier {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tool_identifier_parse() {
+        // Short form without version
+        let tool = ToolIdentifier::parse("act").unwrap();
+        assert_eq!(tool.author, "unknown");
+        assert_eq!(tool.repo, "act");
+        assert_eq!(tool.version, Some("default".to_string()));
+
+        // Full form without version
+        let tool = ToolIdentifier::parse("nektos/act").unwrap();
+        assert_eq!(tool.author, "nektos");
+        assert_eq!(tool.repo, "act");
+        assert_eq!(tool.version, Some("default".to_string()));
+
+        // Short form with version
+        let tool = ToolIdentifier::parse("act@v0.2.79").unwrap();
+        assert_eq!(tool.author, "unknown");
+        assert_eq!(tool.repo, "act");
+        assert_eq!(tool.version, Some("v0.2.79".to_string()));
+
+        // Full form with version
+        let tool = ToolIdentifier::parse("nektos/act@v0.2.79").unwrap();
+        assert_eq!(tool.author, "nektos");
+        assert_eq!(tool.repo, "act");
+        assert_eq!(tool.version, Some("v0.2.79".to_string()));
+
+        // Invalid format
+        assert!(ToolIdentifier::parse("owner/repo/extra").is_err());
+    }
+
+    #[test]
+    fn test_tool_identifier_methods() {
+        let tool = ToolIdentifier::parse("nektos/act@v0.2.79").unwrap();
+
+        assert_eq!(tool.full_repo(), "nektos/act");
+        assert_eq!(tool.tool_name(), "act");
+        assert_eq!(tool.api_version(), "v0.2.79");
+        assert_eq!(tool.config_key(), "nektos/act@v0.2.79");
+        assert_eq!(tool.default_config_key(), "nektos/act@latest");
+        assert!(tool.is_pinned());
+
+        // Test unpinned identifier
+        let unpinned_tool = ToolIdentifier::parse("nektos/act").unwrap();
+        assert_eq!(unpinned_tool.api_version(), "latest");
+        assert_eq!(unpinned_tool.config_key(), "nektos/act@latest");
+        assert!(!unpinned_tool.is_pinned());
+
+        // Test short name with version
+        let short_pinned = ToolIdentifier::parse("act@v0.2.79").unwrap();
+        assert_eq!(short_pinned.full_repo(), "act");
+        assert_eq!(short_pinned.config_key(), "act@v0.2.79");
+        assert!(short_pinned.is_pinned());
+    }
+
+    #[test]
+    fn test_tool_identifier_display() {
+        let tool = ToolIdentifier::parse("nektos/act@v0.2.79").unwrap();
+        assert_eq!(tool.to_string(), "nektos/act@v0.2.79");
+
+        // Parse without version explicitly specified
+        let unpinned_tool = ToolIdentifier::parse("nektos/act").unwrap();
+        assert_eq!(unpinned_tool.to_string(), "nektos/act@default");
+    }
+}

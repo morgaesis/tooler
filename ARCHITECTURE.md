@@ -4,6 +4,16 @@
 
 Tooler is a CLI tool manager that automates the downloading, extraction, and execution of binaries from GitHub releases or direct URLs. It focuses on zero-configuration usage and is robust to config migration between hosts.
 
+## Tool Resolution & Aliases
+
+Tooler uses a multi-layered approach to resolve a tool name (e.g., `gh`) to an executable:
+
+1. **Aliases**: Check the `aliases` map in `config.json`. If an alias exists, resolve the target repo (e.g., `gh` -> `cli/cli`).
+2. **Registry Lookup**: Search `config.json` for tools where the `repo` or `tool_name` matches the query.
+3. **Binary Name Deduction**: Search `config.json` for any tool whose actual binary filename matches the query.
+4. **Deep Search**: For each installed tool, check its installation directory for an executable matching the query. This allows running secondary binaries (e.g., `kubeadm`) that were packaged with a primary tool (e.g., `kubectl`).
+5. **Recovery & Install**: If not found in config, attempt to recover from disk or install from a forge.
+
 ## Storage Structure
 
 Tools are stored in the user's data directory (typically `~/.local/share/tooler/tools/`) using the following convention:

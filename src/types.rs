@@ -80,6 +80,8 @@ impl Default for ToolerSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct ToolerConfig {
     pub tools: HashMap<String, ToolInfo>,
+    #[serde(default)]
+    pub aliases: HashMap<String, String>,
     pub settings: ToolerSettings,
 }
 

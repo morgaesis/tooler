@@ -3,7 +3,6 @@ mod config;
 mod download;
 mod install;
 mod platform;
-mod tests;
 mod tool_id;
 mod types;
 
@@ -334,9 +333,41 @@ async fn main() -> Result<()> {
                     println!("  auto-shim: {}", config.settings.auto_shim);
                     println!("  auto-update: {}", config.settings.auto_update);
                     println!("  bin-dir: {}", config.settings.bin_dir);
+
+                    if !config.aliases.is_empty() {
+                        println!("\nAliases:");
+                        for (name, target) in &config.aliases {
+                            println!("  {} -> {}", name, target);
+                        }
+                    }
+
                     println!("\nTools: {}", config.tools.len());
                     for (key, info) in &config.tools {
                         println!("  - {}: v{} ({})", key, info.version, info.repo);
+                    }
+                }
+            }
+            ConfigAction::Alias {
+                name,
+                target,
+                remove,
+            } => {
+                if remove {
+                    if config.aliases.remove(&name).is_some() {
+                        save_tool_configs(&config)?;
+                        tracing::info!("Alias '{}' removed", name);
+                    } else {
+                        tracing::warn!("Alias '{}' not found", name);
+                    }
+                } else if let Some(target) = target {
+                    config.aliases.insert(name.clone(), target.clone());
+                    save_tool_configs(&config)?;
+                    tracing::info!("Alias '{}' set to '{}'", name, target);
+                } else {
+                    if let Some(target) = config.aliases.get(&name) {
+                        println!("{} -> {}", name, target);
+                    } else {
+                        return Err(anyhow!("Alias '{}' not found", name));
                     }
                 }
             }
@@ -414,7 +445,7 @@ async fn execute_run(
     let mut tool_info = find_tool_executable(config, &tool_id);
 
     // Validate tool_info if found
-    if let Some(info) = tool_info {
+    if let Some(ref info) = tool_info {
         let path = Path::new(&info.executable_path);
         if !path.exists() || !is_executable(path, &platform::get_system_info().os) {
             tracing::warn!(
@@ -435,6 +466,7 @@ async fn execute_run(
             let key = ToolIdentifier::parse(&recovered.repo)
                 .map_err(|e| anyhow!(e))?
                 .config_key();
+
             config.tools.insert(key, recovered);
             save_tool_configs(config)?;
             tool_info = find_tool_executable(config, &tool_id);
@@ -544,6 +576,7 @@ async fn execute_run(
 
         // Execute tool
         let mut cmd = Command::new(&executable_path);
+
         cmd.args(&tool_args);
         tracing::debug!("Executing: {:?} {:?}", executable_path, tool_args);
         let mut child = cmd.spawn().map_err(|e| {

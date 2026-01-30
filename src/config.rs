@@ -153,3 +153,29 @@ pub fn normalize_key(key: &str) -> String {
     }
     result
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_key() {
+        assert_eq!(normalize_key("update-check-days"), "update_check_days");
+        assert_eq!(normalize_key("update_check_days"), "update_check_days");
+        assert_eq!(normalize_key("updateCheckDays"), "update_check_days");
+        assert_eq!(normalize_key("UpdateCheckDays"), "update_check_days");
+        assert_eq!(normalize_key("autoShim"), "auto_shim");
+        assert_eq!(normalize_key("auto-shim"), "auto_shim");
+        assert_eq!(normalize_key("bin-dir"), "bin_dir");
+        assert_eq!(normalize_key("bin_dir"), "bin_dir");
+    }
+
+    #[test]
+    fn test_config_default() {
+        let config = ToolerConfig::default();
+        assert!(config.tools.is_empty());
+        assert_eq!(config.settings.update_check_days, 60);
+        assert!(config.settings.auto_shim);
+        assert!(config.settings.bin_dir.contains(".local"));
+    }
+}

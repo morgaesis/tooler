@@ -108,4 +108,14 @@ pub enum ConfigAction {
         #[arg(long, default_value = "json")]
         format: String,
     },
+    /// Manage tool aliases
+    Alias {
+        /// Alias name (e.g., 'gh')
+        name: String,
+        /// Target repository or URL (e.g., 'cli/cli')
+        target: Option<String>,
+        /// Remove the alias
+        #[arg(short, long)]
+        remove: bool,
+    },
 }

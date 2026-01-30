@@ -304,7 +304,17 @@ pub fn is_executable(filepath: &Path, os_system: &str) -> bool {
     // Skip documents and source files that are clearly not the main binary
     if matches!(
         ext.as_str(),
-        "md" | "txt" | "json" | "xml" | "yaml" | "yml" | "html" | "css" | "png" | "jpg" | "gif" | "svg"
+        "md" | "txt"
+            | "json"
+            | "xml"
+            | "yaml"
+            | "yml"
+            | "html"
+            | "css"
+            | "png"
+            | "jpg"
+            | "gif"
+            | "svg"
     ) {
         return false;
     }

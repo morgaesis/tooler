@@ -534,7 +534,14 @@ pub fn find_tool_entry<'a>(
     config: &'a ToolerConfig,
     tool_query: &str,
 ) -> Option<(&'a String, &'a ToolInfo)> {
-    let tool_identifier = ToolIdentifier::parse(tool_query).ok()?;
+    // 0. Resolve alias if it exists
+    let resolved_query = config
+        .aliases
+        .get(tool_query)
+        .map(|s| s.as_str())
+        .unwrap_or(tool_query);
+
+    let tool_identifier = ToolIdentifier::parse(resolved_query).ok()?;
     let tool_key = tool_identifier.config_key();
 
     // 1. Try exact match (including version if specified)
@@ -550,15 +557,37 @@ pub fn find_tool_entry<'a>(
             .tools
             .iter()
             .filter(|(_, info)| {
-                // Tightened matching: must match repo name or full repo path exactly
+                let binary_name = std::path::Path::new(&info.executable_path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+
+                // Tightened matching: match repo name, full repo path, or actual binary name
                 let name_matches = info.tool_name.to_lowercase()
                     == tool_identifier.tool_name().to_lowercase()
-                    || info.repo.to_lowercase() == tool_identifier.full_repo().to_lowercase();
+                    || info.repo.to_lowercase() == tool_identifier.full_repo().to_lowercase()
+                    || binary_name == tool_identifier.tool_name().to_lowercase();
 
-                if !name_matches {
-                    return false;
+                if name_matches {
+                    return version_matches(requested_version, &info.version);
                 }
-                version_matches(requested_version, &info.version)
+
+                // Deep search: check for other binaries in the same directory
+                let exec_path = std::path::Path::new(&info.executable_path);
+                if let Some(parent) = exec_path.parent() {
+                    let candidate = parent.join(tool_identifier.tool_name());
+                    if candidate.exists()
+                        && crate::download::is_executable(
+                            &candidate,
+                            &crate::platform::get_system_info().os,
+                        )
+                    {
+                        return version_matches(requested_version, &info.version);
+                    }
+                }
+
+                false
             })
             .collect();
 
@@ -579,19 +608,68 @@ pub fn find_tool_entry<'a>(
             .tools
             .iter()
             .filter(|(_, info)| {
-                // Tightened matching
-                info.tool_name.to_lowercase() == tool_identifier.tool_name().to_lowercase()
+                let binary_name = std::path::Path::new(&info.executable_path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+
+                // Tightened matching: match repo name, full repo path, or actual binary name
+                if info.tool_name.to_lowercase() == tool_identifier.tool_name().to_lowercase()
                     || info.repo.to_lowercase() == tool_identifier.full_repo().to_lowercase()
+                    || binary_name == tool_identifier.tool_name().to_lowercase()
+                {
+                    return true;
+                }
+
+                // Deep search: check for other binaries in the same directory
+                let exec_path = std::path::Path::new(&info.executable_path);
+                if let Some(parent) = exec_path.parent() {
+                    let candidate = parent.join(tool_identifier.tool_name());
+                    if candidate.exists()
+                        && crate::download::is_executable(
+                            &candidate,
+                            &crate::platform::get_system_info().os,
+                        )
+                    {
+                        return true;
+                    }
+                }
+
+                false
             })
             .max_by_key(|(_, info)| &info.last_accessed)
     }
 }
 
-pub fn find_tool_executable<'a>(
-    config: &'a ToolerConfig,
-    tool_query: &str,
-) -> Option<&'a ToolInfo> {
-    find_tool_entry(config, tool_query).map(|(_, info)| info)
+pub fn find_tool_executable(config: &ToolerConfig, tool_query: &str) -> Option<ToolInfo> {
+    let (_, base_info) = find_tool_entry(config, tool_query)?;
+    let mut info = base_info.clone();
+
+    // Resolve specific binary path within the tool's directory
+    let resolved_query = config
+        .aliases
+        .get(tool_query)
+        .map(|s| s.as_str())
+        .unwrap_or(tool_query);
+    if let Ok(tool_id) = ToolIdentifier::parse(resolved_query) {
+        let target_name = tool_id.tool_name();
+        let exec_path = std::path::Path::new(&info.executable_path);
+
+        if let Some(parent) = exec_path.parent() {
+            if let Some(better_exec) = crate::download::find_executable_in_extracted(
+                parent,
+                &target_name,
+                &info.repo,
+                &crate::platform::get_system_info().os,
+                &std::path::PathBuf::new(),
+            ) {
+                info.executable_path = better_exec.to_string_lossy().to_string();
+            }
+        }
+    }
+
+    Some(info)
 }
 
 pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
@@ -629,10 +707,19 @@ pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
             };
 
             // Stricter directory name matching
-            let expected_dir_name = format!("{}__{}__{}", tool_id.author, tool_id.tool_name(), system_info.arch);
+            let expected_dir_name = format!(
+                "{}__{}__{}",
+                tool_id.author,
+                tool_id.tool_name(),
+                system_info.arch
+            );
             let legacy_dir_name = format!("{}__{}", tool_id.author, tool_id.tool_name());
-            
-            let name_matches = dir_name == expected_dir_name || dir_name == legacy_dir_name;
+
+            let name_matches = if tool_id.author == "unknown" {
+                repo == tool_id.tool_name()
+            } else {
+                dir_name == expected_dir_name || dir_name == legacy_dir_name
+            };
 
             if name_matches {
                 // If arch is present in directory name, it MUST match
@@ -693,9 +780,7 @@ pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
                         &PathBuf::new(),
                     ) {
                         // Double check architecture of the recovered binary
-                        if let Ok(false) =
-                            crate::platform::check_binary_architecture(&exec_path)
-                        {
+                        if let Ok(false) = crate::platform::check_binary_architecture(&exec_path) {
                             tracing::debug!(
                                 "Recovered binary {} has mismatched architecture, skipping",
                                 exec_path.display()
@@ -780,5 +865,205 @@ pub(crate) fn version_matches(requested: &str, existing: &str) -> bool {
 
         // Non-semver versions (like "master", "tip", etc.) - exact match only
         requested_clean == existing_clean
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    #[test]
+    fn test_version_matches() {
+        // Exact matches
+        assert!(version_matches("1.2.3", "1.2.3"));
+        assert!(version_matches("v1.2.3", "1.2.3"));
+        assert!(version_matches("master", "master"));
+
+        // Partial semver matches
+        assert!(version_matches("1.2", "1.2.3"));
+        assert!(version_matches("1", "1.5.0"));
+        assert!(version_matches("v1.2", "1.2.0"));
+
+        // Non-matching versions
+        assert!(!version_matches("2", "1.5.0"));
+        assert!(!version_matches("1.2.3", "1.2.4"));
+        assert!(!version_matches("master", "main"));
+        assert!(!version_matches("1.2", "2.0.0"));
+
+        // Edge cases
+        assert!(version_matches("1.2.0", "1.2.0"));
+        assert!(!version_matches("1.2", "1.1.9"));
+        assert!(!version_matches("1", "0.9.0"));
+    }
+
+    #[test]
+    fn test_find_highest_version() {
+        let now = Utc::now().to_rfc3339();
+        let mut tools = Vec::new();
+
+        // Create test tools with different versions
+        tools.push(ToolInfo {
+            tool_name: "test".to_string(),
+            repo: "owner/test".to_string(),
+            version: "1.0.0".to_string(),
+            executable_path: "/test/path".to_string(),
+            install_type: "binary".to_string(),
+            pinned: false,
+            installed_at: now.clone(),
+            last_accessed: now.clone(),
+            last_checked: None,
+            forge: crate::types::Forge::GitHub,
+            original_url: None,
+        });
+
+        tools.push(ToolInfo {
+            tool_name: "test".to_string(),
+            repo: "owner/test".to_string(),
+            version: "2.0.0".to_string(),
+            executable_path: "/test/path2".to_string(),
+            install_type: "binary".to_string(),
+            pinned: false,
+            installed_at: now.clone(),
+            last_accessed: now.clone(),
+            last_checked: None,
+            forge: crate::types::Forge::GitHub,
+            original_url: None,
+        });
+
+        tools.push(ToolInfo {
+            tool_name: "test".to_string(),
+            repo: "owner/test".to_string(),
+            version: "1.5.0".to_string(),
+            executable_path: "/test/path3".to_string(),
+            install_type: "binary".to_string(),
+            pinned: false,
+            installed_at: now.clone(),
+            last_accessed: now.clone(),
+            last_checked: None,
+            forge: crate::types::Forge::GitHub,
+            original_url: None,
+        });
+
+        // Test finding highest version
+        let tool_refs: Vec<&ToolInfo> = tools.iter().collect();
+        let highest = find_highest_version(tool_refs).unwrap();
+        assert_eq!(highest.version, "2.0.0");
+    }
+
+    #[test]
+    fn test_pin_tool_functionality() {
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+        std::env::set_var("TOOLER_CONFIG_PATH", &config_path);
+
+        let now = Utc::now().to_rfc3339();
+        let mut config = ToolerConfig::default();
+
+        // Create a test tool
+        let tool_info = ToolInfo {
+            tool_name: "test".to_string(),
+            repo: "owner/test".to_string(),
+            version: "1.0.0".to_string(),
+            executable_path: "/test/path".to_string(),
+            install_type: "binary".to_string(),
+            pinned: false,
+            installed_at: now.clone(),
+            last_accessed: now.clone(),
+            last_checked: None,
+            forge: crate::types::Forge::GitHub,
+            original_url: None,
+        };
+
+        // Add tool to config
+        config
+            .tools
+            .insert("owner/test@1.0.0".to_string(), tool_info.clone());
+        config
+            .tools
+            .insert("owner/test@latest".to_string(), tool_info.clone());
+
+        // Test pinning the tool
+        assert!(pin_tool(&mut config, "owner/test@1.0.0").is_ok());
+
+        // Verify pinned status
+        let pinned_tool = config.tools.get("owner/test@1.0.0").unwrap();
+        assert!(pinned_tool.pinned);
+
+        // Verify @latest entry is also pinned
+        let latest_tool = config.tools.get("owner/test@latest").unwrap();
+        assert!(latest_tool.pinned);
+        assert_eq!(latest_tool.version, "1.0.0");
+
+        std::env::remove_var("TOOLER_CONFIG_PATH");
+    }
+
+    #[test]
+    fn test_alias_and_multi_binary_deduction() {
+        let mut config = ToolerConfig::default();
+        let now = Utc::now().to_rfc3339();
+
+        // Setup a mock tool 'kubernetes/kubectl' which also contains 'kubeadm'
+        let temp_dir = tempfile::tempdir().unwrap();
+        let kubectl_path = temp_dir.path().join("kubectl");
+        let kubeadm_path = temp_dir.path().join("kubeadm");
+
+        std::fs::write(&kubectl_path, "kubectl binary").unwrap();
+        std::fs::write(&kubeadm_path, "kubeadm binary").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&kubectl_path, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            std::fs::set_permissions(&kubeadm_path, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+
+        let info = ToolInfo {
+            tool_name: "kubectl".to_string(),
+            repo: "kubernetes/kubectl".to_string(),
+            version: "v1.31.0".to_string(),
+            executable_path: kubectl_path.to_string_lossy().to_string(),
+            install_type: "binary".to_string(),
+            pinned: false,
+            installed_at: now.clone(),
+            last_accessed: now.clone(),
+            last_checked: None,
+            forge: crate::types::Forge::GitHub,
+            original_url: None,
+        };
+
+        config
+            .tools
+            .insert("kubernetes/kubectl@latest".to_string(), info);
+
+        // 1. Test deduction by primary binary name
+        let found = find_tool_executable(&config, "kubectl").unwrap();
+        assert_eq!(found.repo, "kubernetes/kubectl");
+        assert!(found.executable_path.ends_with("kubectl"));
+
+        // 2. Test deduction of multi-binary 'kubeadm' from 'kubectl' installation
+        let found_multi = find_tool_executable(&config, "kubeadm").unwrap();
+        assert_eq!(found_multi.repo, "kubernetes/kubectl");
+        assert!(found_multi.executable_path.ends_with("kubeadm"));
+
+        // 3. Test aliases
+        config
+            .aliases
+            .insert("k".to_string(), "kubectl".to_string());
+        let found_alias = find_tool_executable(&config, "k").unwrap();
+        assert_eq!(found_alias.repo, "kubernetes/kubectl");
+        assert!(found_alias.executable_path.ends_with("kubectl"));
+
+        // 4. Test alias to multi-binary
+        config
+            .aliases
+            .insert("ka".to_string(), "kubeadm".to_string());
+        let found_alias_multi = find_tool_executable(&config, "ka").unwrap();
+        assert_eq!(found_alias_multi.repo, "kubernetes/kubectl");
+        assert!(found_alias_multi.executable_path.ends_with("kubeadm"));
     }
 }
