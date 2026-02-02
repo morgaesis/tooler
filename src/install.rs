@@ -302,7 +302,7 @@ pub async fn install_or_update_tool(
             tool_id,
             release_info.tag_name
         );
-        let archive_name = download_url.split('/').last().unwrap_or("unknown");
+        let archive_name = download_url.split('/').next_back().unwrap_or("unknown");
         let archive_path = version_dir.join(archive_name);
         if let Some(exec_path) = find_executable_in_extracted(
             &version_dir,
@@ -316,7 +316,7 @@ pub async fn install_or_update_tool(
     }
 
     fs::create_dir_all(&version_dir)?;
-    let archive_name = download_url.split('/').last().unwrap_or("unknown");
+    let archive_name = download_url.split('/').next_back().unwrap_or("unknown");
     let archive_path = version_dir.join(archive_name);
 
     download_file(&download_url, &archive_path).await?;
@@ -352,7 +352,7 @@ pub async fn install_or_update_tool(
         install_type: if archive_name.contains('.') {
             archive_name
                 .split('.')
-                .last()
+                .next_back()
                 .unwrap_or("binary")
                 .to_string()
         } else {
@@ -373,16 +373,21 @@ pub async fn install_or_update_tool(
     Ok(executable_path)
 }
 
-pub async fn get_gh_release_info(repo: &str, version: Option<&str>) -> Result<GitHubRelease> {
-    let url = if let Some(v) = version {
-        if v == "latest" {
+/// Build GitHub API URL for fetching release information
+pub fn build_gh_release_url(repo: &str, version: Option<&str>) -> String {
+    if let Some(v) = version {
+        if v == "latest" || v == "default" {
             format!("https://api.github.com/repos/{}/releases/latest", repo)
         } else {
             format!("https://api.github.com/repos/{}/releases/tags/{}", repo, v)
         }
     } else {
         format!("https://api.github.com/repos/{}/releases/latest", repo)
-    };
+    }
+}
+
+pub async fn get_gh_release_info(repo: &str, version: Option<&str>) -> Result<GitHubRelease> {
+    let url = build_gh_release_url(repo, version);
 
     let client = reqwest::Client::new();
     let response = client
@@ -520,11 +525,11 @@ pub fn recover_all_installed_tools(config: &mut ToolerConfig) -> Result<usize> {
 }
 
 #[allow(dead_code)]
-pub(crate) fn find_highest_version<'a>(tools: Vec<&'a ToolInfo>) -> Option<&'a ToolInfo> {
+pub(crate) fn find_highest_version(tools: Vec<&ToolInfo>) -> Option<&ToolInfo> {
     tools.into_iter().max_by(|a, b| {
-        let v_a = semver::Version::parse(&a.version.trim_start_matches('v'))
+        let v_a = semver::Version::parse(a.version.trim_start_matches('v'))
             .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
-        let v_b = semver::Version::parse(&b.version.trim_start_matches('v'))
+        let v_b = semver::Version::parse(b.version.trim_start_matches('v'))
             .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
         v_a.cmp(&v_b)
     })
@@ -548,7 +553,7 @@ pub fn find_tool_entry<'a>(
     if tool_identifier.is_pinned() {
         let requested_version = tool_identifier.version.as_ref().unwrap();
 
-        if config.tools.get(&tool_key).is_some() {
+        if config.tools.contains_key(&tool_key) {
             return config.tools.get_key_value(&tool_key);
         }
 
@@ -593,9 +598,9 @@ pub fn find_tool_entry<'a>(
 
         if !matching_tools.is_empty() {
             return matching_tools.into_iter().max_by(|a, b| {
-                let v_a = semver::Version::parse(&a.1.version.trim_start_matches('v'))
+                let v_a = semver::Version::parse(a.1.version.trim_start_matches('v'))
                     .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
-                let v_b = semver::Version::parse(&b.1.version.trim_start_matches('v'))
+                let v_b = semver::Version::parse(b.1.version.trim_start_matches('v'))
                     .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
                 v_a.cmp(&v_b)
             });
@@ -682,6 +687,9 @@ pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
         scan_dirs.push(tools_dir.join(forge));
     }
 
+    // Pre-compile regex for version detection
+    let re_version = regex::Regex::new(r"v?\d+\.\d+").unwrap();
+
     for forge_dir in scan_dirs {
         if !forge_dir.exists() {
             continue;
@@ -737,7 +745,6 @@ pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
 
                 // Recursively find directories that look like versions
                 let mut version_candidates = Vec::new();
-                let re_version = regex::Regex::new(r"v?\d+\.\d+").unwrap();
 
                 for entry in WalkDir::new(&path).into_iter().filter_map(|e| e.ok()) {
                     if entry.path().is_dir() {
@@ -764,9 +771,9 @@ pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
 
                 // Sort and pick latest version
                 version_candidates.sort_by(|a, b| {
-                    let v_a = semver::Version::parse(&a.0.trim_start_matches('v'))
+                    let v_a = semver::Version::parse(a.0.trim_start_matches('v'))
                         .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
-                    let v_b = semver::Version::parse(&b.0.trim_start_matches('v'))
+                    let v_b = semver::Version::parse(b.0.trim_start_matches('v'))
                         .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
                     v_a.cmp(&v_b)
                 });
@@ -998,6 +1005,39 @@ mod tests {
         assert_eq!(latest_tool.version, "1.0.0");
 
         std::env::remove_var("TOOLER_CONFIG_PATH");
+    }
+
+    #[test]
+    fn test_build_gh_release_url() {
+        // Test with specific version
+        assert_eq!(
+            build_gh_release_url("owner/repo", Some("v1.2.3")),
+            "https://api.github.com/repos/owner/repo/releases/tags/v1.2.3"
+        );
+
+        // Test with "latest" version
+        assert_eq!(
+            build_gh_release_url("owner/repo", Some("latest")),
+            "https://api.github.com/repos/owner/repo/releases/latest"
+        );
+
+        // Test with "default" version (should map to latest)
+        assert_eq!(
+            build_gh_release_url("owner/repo", Some("default")),
+            "https://api.github.com/repos/owner/repo/releases/latest"
+        );
+
+        // Test with None version
+        assert_eq!(
+            build_gh_release_url("owner/repo", None),
+            "https://api.github.com/repos/owner/repo/releases/latest"
+        );
+
+        // Test with complex version tag (with slashes)
+        assert_eq!(
+            build_gh_release_url("owner/repo", Some("prefix/v1.0.0")),
+            "https://api.github.com/repos/owner/repo/releases/tags/prefix/v1.0.0"
+        );
     }
 
     #[test]

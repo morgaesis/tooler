@@ -3,7 +3,7 @@ mod common;
 use common::{CommandOutput, TestContext};
 
 #[test]
-#[ignore]
+#[cfg(feature = "e2e")]
 fn e2e_run_nektos_act_version() {
     let ctx = TestContext::new();
 
@@ -21,7 +21,7 @@ fn e2e_run_nektos_act_version() {
 }
 
 #[test]
-#[ignore]
+#[cfg(feature = "e2e")]
 fn e2e_run_infisical_complex_tag() {
     let ctx = TestContext::new();
 
@@ -41,7 +41,7 @@ fn e2e_run_infisical_complex_tag() {
 }
 
 #[test]
-#[ignore]
+#[cfg(feature = "e2e")]
 fn e2e_config_lifecycle() {
     let ctx = TestContext::new();
 
@@ -88,7 +88,7 @@ fn e2e_config_lifecycle() {
 }
 
 #[test]
-#[ignore]
+#[cfg(feature = "e2e")]
 fn e2e_run_with_asset_selection() {
     let ctx = TestContext::new();
 
@@ -114,7 +114,7 @@ fn e2e_run_with_asset_selection() {
 }
 
 #[test]
-#[ignore]
+#[cfg(feature = "e2e")]
 fn e2e_run_short_name_after_install() {
     let ctx = TestContext::new();
 
@@ -135,4 +135,23 @@ fn e2e_run_short_name_after_install() {
         .into();
 
     output.assert_success().assert_stdout_contains("act");
+}
+
+#[test]
+#[cfg(feature = "e2e")]
+fn e2e_run_without_version_defaults_to_latest() {
+    let ctx = TestContext::new();
+
+    // Test running without version (should default to latest)
+    // This verifies the fix for the "default" version bug
+    let output: CommandOutput = ctx
+        .cmd()
+        .args(["run", "Yakitrak/obsidian-cli", "--version"])
+        .output()
+        .expect("Failed to run tooler without explicit version")
+        .into();
+
+    output
+        .assert_success()
+        .assert_stdout_contains("obsidian-cli version");
 }

@@ -363,12 +363,10 @@ async fn main() -> Result<()> {
                     config.aliases.insert(name.clone(), target.clone());
                     save_tool_configs(&config)?;
                     tracing::info!("Alias '{}' set to '{}'", name, target);
+                } else if let Some(target) = config.aliases.get(&name) {
+                    println!("{} -> {}", name, target);
                 } else {
-                    if let Some(target) = config.aliases.get(&name) {
-                        println!("{} -> {}", name, target);
-                    } else {
-                        return Err(anyhow!("Alias '{}' not found", name));
-                    }
+                    return Err(anyhow!("Alias '{}' not found", name));
                 }
             }
         },
