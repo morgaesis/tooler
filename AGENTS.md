@@ -14,6 +14,11 @@
 
 - **State Hierarchy**: Respect the established hierarchy of state: `config.json` -> Local Storage -> Remote Forge.
 
+## Version Control Standards
+
+- **Semantic Commits**: All commit messages must follow the Conventional Commits specification (e.g., `feat:`, `fix:`, `chore:`, `refactor:`, etc.).
+- **Semver**: Use Semantic Versioning (vX.Y.Z) for all tags and version bumps in `Cargo.toml`.
+
 ## Documentation Standards
 
 - **No Time-Based Commitments**: Do not use time-based language like "This Week", "Next Week", or specific dates in documentation. Time is arbitrary and creates overly binding constraints. Use priority levels (Critical/High/Medium/Low) instead.
