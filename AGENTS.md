@@ -18,6 +18,7 @@
 
 - **Semantic Commits**: All commit messages must follow the Conventional Commits specification (e.g., `feat:`, `fix:`, `chore:`, `refactor:`, etc.).
 - **Semver**: Use Semantic Versioning (vX.Y.Z) for all tags and version bumps in `Cargo.toml`.
+- **Pre-Push Hooks**: The pre-push hook validates commit messages and runs tests. Warnings indicate potential issues that should be addressed. Use `--no-verify` only when necessary (e.g., pushing tags with legacy commits), not to bypass validation warnings.
 
 ## Documentation Standards
 
