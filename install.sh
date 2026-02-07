@@ -62,7 +62,7 @@ TEMP_DIR=$(mktemp -d)
 cd "$TEMP_DIR"
 
 echo "⬇️  Downloading $ASSET_NAME..."
-curl -L -o "$ASSET_NAME" "$DOWNLOAD_URL"
+curl -fsSL -o "$ASSET_NAME" "$DOWNLOAD_URL"
 
 # Extract
 echo "📂 Extracting..."
@@ -77,6 +77,12 @@ INSTALL_DIR="$HOME/.local/share/tooler/bin"
 mkdir -p "$INSTALL_DIR"
 
 echo "📋 Installing tooler to $INSTALL_DIR..."
+# Remove existing installation if present
+if [[ -f "$INSTALL_DIR/tooler" ]]; then
+    echo "📝 Removing existing installation..."
+    rm -f "$INSTALL_DIR/tooler"
+fi
+# Move new binary into place
 mv "$BINARY_NAME" "$INSTALL_DIR/tooler"
 chmod +x "$INSTALL_DIR/tooler"
 

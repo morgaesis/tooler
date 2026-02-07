@@ -51,7 +51,16 @@ async fn main() -> Result<()> {
             execute_run(&mut config, tool_id, tool_args, asset).await?;
         }
         Commands::Version => {
-            println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+            // Version is handled by clap's #[command(version = ...)] attribute
+            // but we keep this for explicit 'tooler version' command
+            let version_str = if let Some(tag) = option_env!("TOOLER_GIT_TAG") {
+                tag.to_string()
+            } else {
+                let commit = option_env!("TOOLER_GIT_COMMIT").unwrap_or("unknown");
+                let branch = option_env!("TOOLER_GIT_BRANCH").unwrap_or("unknown");
+                format!("v{}-{} ({})", env!("CARGO_PKG_VERSION"), commit, branch)
+            };
+            println!("{} {}", env!("CARGO_PKG_NAME"), version_str);
             return Ok(());
         }
         Commands::List => {

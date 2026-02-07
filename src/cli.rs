@@ -1,9 +1,27 @@
 use clap::{Parser, Subcommand};
 
+fn get_version() -> &'static str {
+    const BASE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+    // If there's a git tag at HEAD, use just the tag (release build)
+    if let Some(tag) = option_env!("TOOLER_GIT_TAG") {
+        return tag;
+    }
+
+    // Not on a tag - include commit hash and branch (dev build)
+    let commit = option_env!("TOOLER_GIT_COMMIT").unwrap_or("unknown");
+    let branch = option_env!("TOOLER_GIT_BRANCH").unwrap_or("unknown");
+
+    // Return a static string by leaking the formatted string
+    // This is safe because it only happens once at startup
+    let version = format!("v{}-{} ({})", BASE_VERSION, commit, branch);
+    Box::leak(version.into_boxed_str())
+}
+
 #[derive(Parser)]
 #[command(name = "tooler")]
 #[command(about = "A CLI tool manager for GitHub Releases")]
-#[command(version, propagate_version = true)]
+#[command(version = get_version(), propagate_version = true)]
 pub struct Cli {
     /// Increase verbosity (use multiple times for more detail)
     #[arg(short, long, action = clap::ArgAction::Count, global = true)]
