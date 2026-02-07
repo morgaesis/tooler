@@ -3,6 +3,9 @@ use std::process::{Command, Output};
 use std::str;
 use tempfile::TempDir;
 
+// Test helper types and methods are conditionally compiled with the "e2e" feature,
+// but we keep them in the module for discoverability and future test expansion.
+// The warnings are suppressed to keep CI clean while maintaining the API for e2e tests.
 #[allow(dead_code)]
 pub struct TestContext {
     pub _temp_dir: TempDir,
@@ -40,6 +43,9 @@ impl TestContext {
     }
 }
 
+// CommandOutput provides test assertion helpers for e2e tests.
+// These methods are only used when the "e2e" feature is enabled,
+// but we keep them available for test development and debugging.
 #[allow(dead_code)]
 pub struct CommandOutput {
     pub stdout: String,
@@ -57,6 +63,8 @@ impl From<Output> for CommandOutput {
     }
 }
 
+// Assertion helpers for e2e tests - used to verify command output.
+// Only active when "e2e" feature is enabled, but kept available for future tests.
 #[allow(dead_code)]
 impl CommandOutput {
     pub fn assert_success(&self) -> &Self {

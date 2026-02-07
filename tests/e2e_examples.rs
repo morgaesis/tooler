@@ -1,5 +1,8 @@
 mod common;
 
+// These imports are only needed for e2e feature tests.
+// The module itself is always compiled to ensure it parses,
+// but the imports are gated to avoid unused import warnings in default test runs.
 #[cfg(feature = "e2e")]
 use common::{CommandOutput, TestContext};
 
