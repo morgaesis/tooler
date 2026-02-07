@@ -124,9 +124,20 @@ jobs:
         with:
           path: artifacts
 
+      - name: Create release-specific install script
+        run: |
+          # Create a version-locked install.sh for this release
+          mkdir -p dist
+          cp install.sh dist/install.sh
+          # Substitute the version between the markers
+          sed -i 's/TOOLER_VERSION=""/TOOLER_VERSION="${{ github.ref_name }}"/' dist/install.sh
+          echo "Created release-specific install.sh for ${{ github.ref_name }}"
+          grep "TOOLER_VERSION=" dist/install.sh | head -1
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
             artifacts/**/*.tar.gz
             artifacts/**/*.zip
+            dist/install.sh

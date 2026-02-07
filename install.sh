@@ -2,9 +2,20 @@
 set -e
 
 # Installation script for tooler (Rust version)
-# This script downloads and installs the latest release of tooler
+# This script downloads and installs tooler
+# If TOOLER_VERSION is set, it installs that specific version
+# Otherwise it installs the latest release
 
-echo "🚀 Installing tooler..."
+# Embedded version (set during release build via sed substitution)
+# RELEASE_VERSION_MARKER_START
+TOOLER_VERSION=""
+# RELEASE_VERSION_MARKER_END
+
+if [[ -n "$TOOLER_VERSION" ]]; then
+  echo "🚀 Installing tooler $TOOLER_VERSION..."
+else
+  echo "🚀 Installing tooler (latest)..."
+fi
 
 # Detect platform
 OS=$(uname -s | tr '[:upper:]' '[:lower:]')
@@ -22,17 +33,24 @@ if [[ "$OS" == "windows" ]]; then
   BINARY_NAME="tooler.exe"
 fi
 
-# Get latest release info
-echo "📡 Fetching latest release..."
-RELEASE_INFO=$(curl -s "https://api.github.com/repos/morgaesis/tooler/releases/latest")
-TAG=$(echo "$RELEASE_INFO" | grep -o '"tag_name": "[^"]*' | cut -d'"' -f4)
+# Get version to install
+if [[ -n "$TOOLER_VERSION" ]]; then
+  # Embedded version from this script's release
+  TAG="$TOOLER_VERSION"
+  echo "📦 Installing release version: $TAG"
+else
+  # Fetch latest release info
+  echo "📡 Fetching latest release..."
+  RELEASE_INFO=$(curl -fsSL "https://api.github.com/repos/morgaesis/tooler/releases/latest")
+  TAG=$(echo "$RELEASE_INFO" | grep -o '"tag_name": "[^"]*' | cut -d'"' -f4)
 
-if [[ -z "$TAG" ]]; then
-  echo "❌ Failed to fetch release information"
-  exit 1
+  if [[ -z "$TAG" ]]; then
+    echo "❌ Failed to fetch release information"
+    exit 1
+  fi
+
+  echo "📦 Found latest version: $TAG"
 fi
-
-echo "📦 Found latest version: $TAG"
 
 # Find appropriate asset
 ASSET_NAME=""
