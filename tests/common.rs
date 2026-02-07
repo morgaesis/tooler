@@ -3,6 +3,7 @@ use std::process::{Command, Output};
 use std::str;
 use tempfile::TempDir;
 
+#[allow(dead_code)]
 pub struct TestContext {
     pub _temp_dir: TempDir,
     pub config_path: PathBuf,
@@ -10,6 +11,7 @@ pub struct TestContext {
     pub bin_path: PathBuf,
 }
 
+#[allow(dead_code)]
 impl TestContext {
     pub fn new() -> Self {
         let temp_dir = TempDir::new().expect("Failed to create temp dir");
@@ -38,6 +40,7 @@ impl TestContext {
     }
 }
 
+#[allow(dead_code)]
 pub struct CommandOutput {
     pub stdout: String,
     pub stderr: String,
@@ -54,6 +57,7 @@ impl From<Output> for CommandOutput {
     }
 }
 
+#[allow(dead_code)]
 impl CommandOutput {
     pub fn assert_success(&self) -> &Self {
         if !self.status.success() {

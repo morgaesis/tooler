@@ -1,5 +1,6 @@
 mod common;
 
+#[cfg(feature = "e2e")]
 use common::{CommandOutput, TestContext};
 
 #[test]
