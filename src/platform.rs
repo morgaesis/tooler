@@ -45,6 +45,7 @@ pub fn find_asset_for_platform(
 
     let arch_aliases = [
         ("x86_64", vec!["amd64", "x64", "x86_64"]),
+        ("amd64", vec!["amd64", "x64", "x86_64"]), // Add amd64 as key since get_system_info normalizes x86_64 to amd64
         ("aarch64", vec!["arm64", "aarch64"]),
         ("arm64", vec!["arm64", "aarch64"]), // Add arm64 as key since get_system_info normalizes aarch64 to arm64
         ("arm", vec!["arm", "armv7"]),
