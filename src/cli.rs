@@ -123,7 +123,7 @@ pub enum ConfigAction {
     /// Show full configuration
     Show {
         /// Output format (json, yaml, plain)
-        #[arg(long, default_value = "json")]
+        #[arg(long, default_value = "plain")]
         format: String,
     },
     /// Manage tool aliases

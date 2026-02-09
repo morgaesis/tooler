@@ -14,7 +14,7 @@ A CLI tool manager for GitHub Releases written in Rust.
 - **Update Checking**: Automatically checks for tool updates
 - **Configuration**: Persistent configuration with environment variable overrides
 - **Version Pinning**: Pin tools to specific versions to prevent auto-updates
-- **Complex Version Support**: Handle GitHub release tags with slashes (e.g., infisical-cli/v0.41.90)
+- **Complex Version Support**: Handle GitHub release tags with slashes (e.g., [infisical-cli/v0.41.90](https://github.com/Infisical/infisical/releases/tag/infisical-cli/v0.41.90))
 
 ![Tooler Demo](./assets/demo.svg)
 
@@ -56,6 +56,11 @@ tooler run https://dl.k8s.io/release/v1.31.0/bin/linux/arm64/kubectl --version
 
 # Install a tool from a specific archive URL
 tooler run https://example.com/downloads/mytool-v1.0.0-linux-amd64.tar.gz --help
+
+# Install and run a tool with different repo and binary name
+tooler pull cli/cli # GitHub's `gh` CLI
+tooler run gh --version
+gh --version # Or just use the auto-shimmed binary
 ```
 
 ### Advanced Usage
@@ -89,6 +94,7 @@ tooler config get update-check-days
 # Set a setting (both formats supported)
 tooler config set auto-shim=true
 tooler config set auto-update true
+tooler config set updateCheckDays 14
 
 # Unset a setting (revert to default)
 tooler config unset auto-shim
