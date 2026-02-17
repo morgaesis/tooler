@@ -44,6 +44,8 @@ pub struct ToolerSettings {
     pub auto_update: bool,
     #[serde(default = "default_bin_dir", alias = "shim_dir")]
     pub bin_dir: String,
+    #[serde(default = "default_parse_release_body")]
+    pub parse_release_body: bool,
 }
 
 fn default_update_check_days() -> i32 {
@@ -65,6 +67,9 @@ fn default_bin_dir() -> String {
         .to_string_lossy()
         .to_string()
 }
+fn default_parse_release_body() -> bool {
+    true
+}
 
 impl Default for ToolerSettings {
     fn default() -> Self {
@@ -73,6 +78,7 @@ impl Default for ToolerSettings {
             auto_shim: default_auto_shim(),
             auto_update: default_auto_update(),
             bin_dir: default_bin_dir(),
+            parse_release_body: default_parse_release_body(),
         }
     }
 }
@@ -101,6 +107,8 @@ pub struct AssetInfo {
 pub struct GitHubRelease {
     pub tag_name: String,
     pub assets: Vec<GitHubAsset>,
+    #[serde(default)]
+    pub body: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

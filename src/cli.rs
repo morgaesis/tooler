@@ -53,6 +53,12 @@ pub enum Commands {
         /// Explicitly specify asset name from the release to download
         #[arg(long)]
         asset: Option<String>,
+        /// Parse release body for download URLs when assets don't match platform
+        #[arg(long, overrides_with = "no_parse_release_body")]
+        parse_release_body: bool,
+        /// Don't parse release body for download URLs
+        #[arg(long)]
+        no_parse_release_body: bool,
     },
 
     /// List all installed tools
@@ -68,6 +74,12 @@ pub enum Commands {
     Pull {
         /// Tool to pull (e.g., 'owner/repo' or 'tool-name')
         tool_id: String,
+        /// Parse release body for download URLs when assets don't match platform
+        #[arg(long, overrides_with = "no_parse_release_body")]
+        parse_release_body: bool,
+        /// Don't parse release body for download URLs
+        #[arg(long)]
+        no_parse_release_body: bool,
     },
 
     /// Remove an installed tool

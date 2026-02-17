@@ -3,7 +3,35 @@
 //! Provides functions for querying GitHub releases and constructing API URLs.
 
 use crate::types::GitHubRelease;
-use anyhow::{anyhow, Result};
+use anyhow::Result;
+use reqwest::StatusCode;
+use std::error::Error;
+use std::fmt;
+
+#[derive(Debug)]
+pub enum GitHubReleaseError {
+    TagNotFound { repo: String, version: String },
+    LatestNotFound { repo: String },
+    RequestFailed { repo: String, status: StatusCode },
+}
+
+impl fmt::Display for GitHubReleaseError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GitHubReleaseError::TagNotFound { repo, version } => {
+                write!(f, "Release tag '{}' not found in {}", version, repo)
+            }
+            GitHubReleaseError::LatestNotFound { repo } => {
+                write!(f, "No releases found for {}", repo)
+            }
+            GitHubReleaseError::RequestFailed { repo, status } => {
+                write!(f, "Failed to get release info for {}: {}", repo, status)
+            }
+        }
+    }
+}
+
+impl Error for GitHubReleaseError {}
 
 /// Build GitHub API URL for fetching release information
 ///
@@ -38,11 +66,24 @@ pub async fn get_gh_release_info(repo: &str, version: Option<&str>) -> Result<Gi
         .await?;
 
     if !response.status().is_success() {
-        return Err(anyhow!(
-            "Failed to get release info for {}: {}",
-            repo,
-            response.status()
-        ));
+        if response.status() == StatusCode::NOT_FOUND {
+            if let Some(v) = version {
+                return Err(GitHubReleaseError::TagNotFound {
+                    repo: repo.to_string(),
+                    version: v.to_string(),
+                }
+                .into());
+            }
+            return Err(GitHubReleaseError::LatestNotFound {
+                repo: repo.to_string(),
+            }
+            .into());
+        }
+        return Err(GitHubReleaseError::RequestFailed {
+            repo: repo.to_string(),
+            status: response.status(),
+        }
+        .into());
     }
 
     let release: GitHubRelease = response.json().await?;

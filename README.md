@@ -7,6 +7,7 @@ A CLI tool manager for GitHub Releases written in Rust.
 - **Forge Support**: Seamlessly manages tools from GitHub Releases and direct URLs
 - **Direct URL Installation**: Install and shim any binary or archive from the internet directly
 - **Intelligent Discovery**: Automatically detects tool names and versions from URLs and attempts to discover updates via directory scraping
+- **Release Body Parsing**: When GitHub releases lack direct asset downloads, automatically parses release notes for download URLs (e.g., Helm's get.helm.sh pattern)
 - **Platform Detection**: Automatically detects your OS and architecture to download the right binaries
 - **Archive Support**: Extracts tar.gz, tar.xz, and zip archives
 - **Python Support**: Installs Python tools from wheel files with virtual environments
@@ -61,6 +62,25 @@ tooler run https://example.com/downloads/mytool-v1.0.0-linux-amd64.tar.gz --help
 tooler pull cli/cli # GitHub's `gh` CLI
 tooler run gh --version
 gh --version # Or just use the auto-shimmed binary
+
+# Tools like Helm that host binaries externally (release body parsing)
+tooler pull helm/helm
+helm version
+```
+
+### Release Body Parsing
+
+Some projects (like Helm) upload only signature files to GitHub releases and host actual binaries elsewhere. Tooler handles this automatically by parsing release notes for download URLs:
+
+```bash
+# Works automatically with release body parsing enabled (default)
+tooler pull helm/helm
+
+# Disable release body parsing globally
+tooler config set parse-release-body=false
+
+# Or disable per-command
+tooler pull helm/helm --no-parse-release-body
 ```
 
 ### Advanced Usage
@@ -122,6 +142,7 @@ Settings are stored in `~/.config/tooler/config.json`. Overrides are supported v
 - `update-check-days`: Days between update checks (default: 60, env: `TOOLER_UPDATE_CHECK_DAYS`)
 - `auto-shim`: Create command-line shims (default: true, env: `TOOLER_AUTO_SHIM`)
 - `auto-update`: Automatically update tools on run (default: true, env: `TOOLER_AUTO_UPDATE`)
+- `parse-release-body`: Parse release notes for download URLs when assets don't match (default: true, env: `TOOLER_PARSE_RELEASE_BODY`)
 - `bin-dir`: Directory for binaries and shims (default: `~/.local/share/tooler/bin`, env: `TOOLER_BIN_DIR`)
 
 Logging is controlled via `LOG_LEVEL` or `TOOLER_LOG_LEVEL`.

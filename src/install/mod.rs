@@ -199,7 +199,7 @@ pub async fn check_for_updates(config: &mut ToolerConfig) -> Result<()> {
         );
     }
     for (_name, repo, _version) in tools_to_auto_update {
-        match install_or_update_tool(config, &repo, true, None).await {
+        match install_or_update_tool(config, &repo, true, None, None).await {
             Ok(_) => tracing::info!("{} auto-updated successfully", repo),
             Err(e) => tracing::error!("Failed to auto-update {}: {}", repo, e),
         }
@@ -229,6 +229,7 @@ pub async fn install_or_update_tool(
     tool_id: &str,
     is_update: bool,
     asset_name: Option<&str>,
+    parse_release_body: Option<bool>,
 ) -> Result<PathBuf> {
     let tool_identifier = ToolIdentifier::parse(tool_id).map_err(|e| anyhow!(e))?;
     let system_info = get_system_info();
@@ -248,6 +249,7 @@ pub async fn install_or_update_tool(
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string()),
             assets: vec![],
+            body: None,
         },
     };
 
@@ -262,14 +264,47 @@ pub async fn install_or_update_tool(
                     .map(|a| a.browser_download_url.clone())
                     .ok_or_else(|| anyhow!("Asset {} not found in release", name))?
             } else {
-                find_asset_for_platform(
+                match find_asset_for_platform(
                     &release_info.assets,
                     &tool_identifier.full_repo(),
                     &system_info.os,
                     &system_info.arch,
-                )?
-                .map(|a| a.download_url)
-                .ok_or_else(|| anyhow!("No suitable asset found for platform"))?
+                )? {
+                    Some(asset) => asset.download_url,
+                    None => {
+                        let should_parse =
+                            parse_release_body.unwrap_or(config.settings.parse_release_body);
+                        if should_parse {
+                            tracing::debug!(
+                                "No asset found in release, checking release body for URLs"
+                            );
+                            release_info
+                                .body
+                                .as_ref()
+                                .and_then(|body| {
+                                    crate::platform::find_asset_in_release_body(
+                                        body,
+                                        &system_info.os,
+                                        &system_info.arch,
+                                    )
+                                })
+                                .map(|a| a.download_url)
+                                .ok_or_else(|| {
+                                    anyhow!(
+                                        "No suitable asset found for {} {} for your platform",
+                                        tool_identifier.full_repo(),
+                                        release_info.tag_name
+                                    )
+                                })?
+                        } else {
+                            return Err(anyhow!(
+                                "No suitable asset found for {} {} for your platform",
+                                tool_identifier.full_repo(),
+                                release_info.tag_name
+                            ));
+                        }
+                    }
+                }
             };
             (asset_url, None)
         }
@@ -708,13 +743,22 @@ pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
                 }
 
                 // Recursively find directories that look like versions
-                let mut version_candidates = Vec::new();
+                let mut version_candidates: Vec<(String, String, PathBuf)> = Vec::new();
 
                 for entry in WalkDir::new(&path).into_iter().filter_map(|e| e.ok()) {
                     if entry.path().is_dir() {
                         let name = entry.file_name().to_string_lossy();
                         if re_version.is_match(&name) {
-                            version_candidates.push((name.to_string(), entry.path().to_path_buf()));
+                            let label = entry
+                                .path()
+                                .strip_prefix(&path)
+                                .map(|rel| rel.to_string_lossy().to_string())
+                                .unwrap_or_else(|_| name.to_string());
+                            version_candidates.push((
+                                label,
+                                name.to_string(),
+                                entry.path().to_path_buf(),
+                            ));
                         }
                     }
                 }
@@ -724,10 +768,8 @@ pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
                     if let Ok(subs) = fs::read_dir(&path) {
                         for sub in subs.flatten() {
                             if sub.path().is_dir() {
-                                version_candidates.push((
-                                    sub.file_name().to_string_lossy().to_string(),
-                                    sub.path(),
-                                ));
+                                let label = sub.file_name().to_string_lossy().to_string();
+                                version_candidates.push((label.clone(), label, sub.path()));
                             }
                         }
                     }
@@ -735,14 +777,14 @@ pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
 
                 // Sort and pick latest version
                 version_candidates.sort_by(|a, b| {
-                    let v_a = semver::Version::parse(a.0.trim_start_matches('v'))
+                    let v_a = semver::Version::parse(a.1.trim_start_matches('v'))
                         .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
-                    let v_b = semver::Version::parse(b.0.trim_start_matches('v'))
+                    let v_b = semver::Version::parse(b.1.trim_start_matches('v'))
                         .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
                     v_a.cmp(&v_b)
                 });
 
-                if let Some((version, ver_path)) = version_candidates.last() {
+                if let Some((_version_label, semver_name, ver_path)) = version_candidates.last() {
                     if let Some(exec_path) = find_executable_in_extracted(
                         ver_path,
                         repo,
@@ -759,7 +801,8 @@ pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
                             continue;
                         }
 
-                        let clean_version = version.trim_start_matches('v').to_string();
+                        let clean_version = semver_name.trim_start_matches('v').to_string();
+
                         let forge_val = if forge_dir.ends_with("url") {
                             Forge::Url
                         } else {

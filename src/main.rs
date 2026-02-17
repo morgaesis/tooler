@@ -41,14 +41,23 @@ async fn main() -> Result<()> {
             }
             let tool_id = args[0].clone();
             let tool_args = args[1..].to_vec();
-            execute_run(&mut config, tool_id, tool_args, None).await?;
+            execute_run(&mut config, tool_id, tool_args, None, None).await?;
         }
         Commands::Run {
             tool_id,
             tool_args,
             asset,
+            parse_release_body,
+            no_parse_release_body,
         } => {
-            execute_run(&mut config, tool_id, tool_args, asset).await?;
+            let parse_body = if parse_release_body {
+                Some(true)
+            } else if no_parse_release_body {
+                Some(false)
+            } else {
+                None
+            };
+            execute_run(&mut config, tool_id, tool_args, asset, parse_body).await?;
         }
         Commands::Version => {
             // Version is handled by clap's #[command(version = ...)] attribute
@@ -92,7 +101,8 @@ async fn main() -> Result<()> {
                         .collect();
                     for key in keys_to_update {
                         if let Some(info) = config.tools.get(&key).cloned() {
-                            match install_or_update_tool(&mut config, &info.repo, true, None).await
+                            match install_or_update_tool(&mut config, &info.repo, true, None, None)
+                                .await
                             {
                                 Ok(_) => updated_count += 1,
                                 Err(e) => tracing::warn!("Failed to update {}: {}", info.repo, e),
@@ -124,7 +134,7 @@ async fn main() -> Result<()> {
                     };
 
                     tracing::info!("Attempting to update {}...", repo);
-                    match install_or_update_tool(&mut config, &repo, true, None).await {
+                    match install_or_update_tool(&mut config, &repo, true, None, None).await {
                         Ok(_) => tracing::info!("{} updated successfully", tool_id),
                         Err(e) => {
                             tracing::error!("Failed to update tool '{}': {}", tool_id, e);
@@ -167,7 +177,11 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
-        Commands::Pull { tool_id } => {
+        Commands::Pull {
+            tool_id,
+            parse_release_body,
+            no_parse_release_body,
+        } => {
             let tool_identifier = match ToolIdentifier::parse(&tool_id) {
                 Ok(id) => id,
                 Err(e) => {
@@ -188,7 +202,14 @@ async fn main() -> Result<()> {
             };
 
             tracing::info!("Pulling {}...", tool_id);
-            match install_or_update_tool(&mut config, &tool_id, true, None).await {
+            let parse_body = if parse_release_body {
+                Some(true)
+            } else if no_parse_release_body {
+                Some(false)
+            } else {
+                None
+            };
+            match install_or_update_tool(&mut config, &tool_id, true, None, parse_body).await {
                 Ok(path) => {
                     tracing::info!("Successfully pulled {} to {}", tool_id, path.display());
                     if config.settings.auto_shim && !cfg!(windows) {
@@ -199,24 +220,38 @@ async fn main() -> Result<()> {
                 }
                 Err(e) => {
                     tracing::error!("Failed to install tool '{}': {}", tool_id, e);
-                    if e.to_string().contains("404") {
-                        match tool_identifier.forge {
-                            types::Forge::GitHub => {
-                                eprintln!("\nError: Tool '{}' not found on GitHub.", tool_id);
+                    if let Some(gh_error) = e.downcast_ref::<install::github::GitHubReleaseError>()
+                    {
+                        match gh_error {
+                            install::github::GitHubReleaseError::TagNotFound { repo, version } => {
                                 eprintln!(
-                                    "Please check that the repository 'https://github.com/{}' exists.",
-                                    tool_identifier.full_repo()
+                                    "\nError: Release tag '{}' not found in {}.",
+                                    version, repo
+                                );
+                                eprintln!(
+                                    "Check available tags at: https://github.com/{}/tags",
+                                    repo
                                 );
                             }
-                            types::Forge::Url => {
+                            install::github::GitHubReleaseError::LatestNotFound { repo } => {
+                                eprintln!("\nError: No releases found for {}.", repo);
                                 eprintln!(
-                                    "\nError: Tool '{}' (URL) not found or returned 404.",
-                                    tool_id
+                                    "Check available tags at: https://github.com/{}/tags",
+                                    repo
                                 );
-                                if let Some(url) = &tool_identifier.url {
-                                    eprintln!("Please check that the URL '{}' is valid.", url);
-                                }
                             }
+                            install::github::GitHubReleaseError::RequestFailed { repo, .. } => {
+                                eprintln!("\nError: {}", gh_error);
+                                eprintln!(
+                                    "Check available tags at: https://github.com/{}/tags",
+                                    repo
+                                );
+                            }
+                        }
+                    } else if tool_identifier.forge == types::Forge::Url {
+                        eprintln!("\nError: Tool '{}' could not be fetched from URL.", tool_id);
+                        if let Some(url) = &tool_identifier.url {
+                            eprintln!("URL: {}", url);
                         }
                     } else {
                         eprintln!("\nError: {}", e);
@@ -232,6 +267,8 @@ async fn main() -> Result<()> {
                     let value = match normalized_key.as_str() {
                         "update_check_days" => config.settings.update_check_days.to_string(),
                         "auto_shim" => config.settings.auto_shim.to_string(),
+                        "auto_update" => config.settings.auto_update.to_string(),
+                        "parse_release_body" => config.settings.parse_release_body.to_string(),
                         "bin_dir" => config.settings.bin_dir.clone(),
                         _ => format!("Setting '{}' not found", key),
                     };
@@ -245,6 +282,10 @@ async fn main() -> Result<()> {
                         ),
                         ("auto-shim", &config.settings.auto_shim.to_string()),
                         ("auto-update", &config.settings.auto_update.to_string()),
+                        (
+                            "parse-release-body",
+                            &config.settings.parse_release_body.to_string(),
+                        ),
                         ("bin-dir", &config.settings.bin_dir),
                     ] {
                         println!("  {}: {}", k, v);
@@ -289,13 +330,22 @@ async fn main() -> Result<()> {
                         save_tool_configs(&config)?;
                         tracing::info!("Setting '{}' updated to '{}'", normalized_key, value);
                     }
+                    "parse_release_body" => {
+                        let value = value_str.to_lowercase() == "true" || value_str == "1";
+                        config.settings.parse_release_body = value;
+                        save_tool_configs(&config)?;
+                        tracing::info!("Setting '{}' updated to '{}'", normalized_key, value);
+                    }
                     "bin_dir" => {
                         config.settings.bin_dir = value_str.to_string();
                         save_tool_configs(&config)?;
                         tracing::info!("Setting '{}' updated to '{}'", normalized_key, value_str);
                     }
                     _ => {
-                        tracing::error!("'{}' is not a valid configuration setting. Valid settings: update-check-days, auto-shim, auto-update, bin-dir", key);
+                        tracing::error!(
+                            "'{}' is not a valid configuration setting. Valid settings: update-check-days, auto-shim, auto-update, parse-release-body, bin-dir",
+                            key
+                        );
                     }
                 }
             }
@@ -318,13 +368,22 @@ async fn main() -> Result<()> {
                         save_tool_configs(&config)?;
                         tracing::info!("Setting '{}' unset", key);
                     }
+                    "parse_release_body" => {
+                        config.settings.parse_release_body =
+                            ToolerSettings::default().parse_release_body;
+                        save_tool_configs(&config)?;
+                        tracing::info!("Setting '{}' unset", key);
+                    }
                     "bin_dir" => {
                         config.settings.bin_dir = ToolerSettings::default().bin_dir;
                         save_tool_configs(&config)?;
                         tracing::info!("Setting '{}' unset", key);
                     }
                     _ => {
-                        tracing::error!("'{}' is not a valid configuration setting. Valid settings: update_check_days, auto_shim, auto_update, bin_dir", key);
+                        tracing::error!(
+                            "'{}' is not a valid configuration setting. Valid settings: update-check-days, auto-shim, auto-update, parse-release-body, bin-dir",
+                            key
+                        );
                     }
                 }
             }
@@ -341,6 +400,10 @@ async fn main() -> Result<()> {
                     println!("  update-check-days: {}", config.settings.update_check_days);
                     println!("  auto-shim: {}", config.settings.auto_shim);
                     println!("  auto-update: {}", config.settings.auto_update);
+                    println!(
+                        "  parse-release-body: {}",
+                        config.settings.parse_release_body
+                    );
                     println!("  bin-dir: {}", config.settings.bin_dir);
 
                     if !config.aliases.is_empty() {
@@ -412,6 +475,7 @@ async fn execute_run(
     tool_id: String,
     tool_args: Vec<String>,
     asset: Option<String>,
+    parse_release_body: Option<bool>,
 ) -> Result<()> {
     let tool_identifier = match ToolIdentifier::parse(&tool_id) {
         Ok(id) => id,
@@ -488,31 +552,40 @@ async fn execute_run(
                 tool_id
             );
         }
-        match install_or_update_tool(config, &tool_id, false, asset.as_deref()).await {
+        match install_or_update_tool(
+            config,
+            &tool_id,
+            false,
+            asset.as_deref(),
+            parse_release_body,
+        )
+        .await
+        {
             Ok(_) => {
                 *config = load_tool_configs()?; // Reload config
                 tool_info = find_tool_executable(config, &tool_id);
             }
             Err(e) => {
                 tracing::error!("Failed to install tool '{}': {}", tool_id, e);
-                if e.to_string().contains("404") {
-                    match tool_identifier.forge {
-                        types::Forge::GitHub => {
-                            eprintln!("\nError: Tool '{}' not found on GitHub.", tool_id);
-                            eprintln!(
-                                "Please check that the repository 'https://github.com/{}' exists.",
-                                tool_identifier.full_repo()
-                            );
+                if let Some(gh_error) = e.downcast_ref::<install::github::GitHubReleaseError>() {
+                    match gh_error {
+                        install::github::GitHubReleaseError::TagNotFound { repo, version } => {
+                            eprintln!("\nError: Release tag '{}' not found in {}.", version, repo);
+                            eprintln!("Check available tags at: https://github.com/{}/tags", repo);
                         }
-                        types::Forge::Url => {
-                            eprintln!(
-                                "\nError: Tool '{}' (URL) not found or returned 404.",
-                                tool_id
-                            );
-                            if let Some(url) = &tool_identifier.url {
-                                eprintln!("Please check that the URL '{}' is valid.", url);
-                            }
+                        install::github::GitHubReleaseError::LatestNotFound { repo } => {
+                            eprintln!("\nError: No releases found for {}.", repo);
+                            eprintln!("Check available tags at: https://github.com/{}/tags", repo);
                         }
+                        install::github::GitHubReleaseError::RequestFailed { repo, .. } => {
+                            eprintln!("\nError: {}", gh_error);
+                            eprintln!("Check available tags at: https://github.com/{}/tags", repo);
+                        }
+                    }
+                } else if tool_identifier.forge == types::Forge::Url {
+                    eprintln!("\nError: Tool '{}' could not be fetched from URL.", tool_id);
+                    if let Some(url) = &tool_identifier.url {
+                        eprintln!("URL: {}", url);
                     }
                 } else {
                     eprintln!("\nError: {}", e);

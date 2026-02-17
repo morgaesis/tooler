@@ -173,7 +173,7 @@ pub fn find_asset_for_platform(
         }
     }
 
-    tracing::error!("No suitable asset found after all checks");
+    tracing::debug!("No suitable asset found in release assets");
     Ok(None)
 }
 
@@ -256,6 +256,79 @@ fn categorize_assets(
     }
 
     candidates
+}
+
+pub fn find_asset_in_release_body(
+    body: &str,
+    system_os: &str,
+    system_arch: &str,
+) -> Option<AssetInfo> {
+    let os_aliases = [
+        ("linux", vec!["linux", "unknown-linux", "pc-linux"]),
+        ("darwin", vec!["darwin", "macos", "osx"]),
+        ("windows", vec!["windows", "win", "cygwin"]),
+    ];
+
+    let arch_aliases = [
+        ("x86_64", vec!["amd64", "x64", "x86_64"]),
+        ("amd64", vec!["amd64", "x64", "x86_64"]),
+        ("aarch64", vec!["arm64", "aarch64"]),
+        ("arm64", vec!["arm64", "aarch64"]),
+        ("arm", vec!["arm", "armv7"]),
+    ];
+
+    let valid_extensions = [".tar.gz", ".zip", ".tar.xz", ".tgz", ".gz"];
+    let invalid_patterns = [".asc", ".sig", ".sha256", ".sha256sum", ".pem", ".pub"];
+
+    let md_link_regex = regex::Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").ok()?;
+
+    let mut candidates: Vec<AssetInfo> = Vec::new();
+
+    for cap in md_link_regex.captures_iter(body) {
+        let link_text = cap.get(1)?.as_str().to_lowercase();
+        let url = cap.get(2)?.as_str().to_string();
+        let url_lower = url.to_lowercase();
+
+        if invalid_patterns.iter().any(|p| url_lower.ends_with(p)) {
+            continue;
+        }
+
+        if !valid_extensions.iter().any(|ext| url_lower.ends_with(ext)) {
+            continue;
+        }
+
+        let url_filename = url.split('/').next_back().unwrap_or("");
+        let search_text = format!("{} {}", link_text, url_filename.to_lowercase());
+
+        let os_match = os_aliases.iter().any(|(os, aliases)| {
+            os == &system_os && aliases.iter().any(|alias| search_text.contains(alias))
+        });
+
+        let arch_match = arch_aliases.iter().any(|(arch, aliases)| {
+            if arch != &system_arch {
+                return false;
+            }
+            aliases.iter().any(|alias| {
+                if !search_text.contains(alias) {
+                    return false;
+                }
+                if alias == &"arm" && search_text.contains("arm64") {
+                    return false;
+                }
+                true
+            })
+        });
+
+        if os_match && arch_match {
+            let name = url.split('/').next_back().unwrap_or("unknown").to_string();
+            candidates.push(AssetInfo {
+                name,
+                download_url: url,
+            });
+        }
+    }
+
+    candidates.into_iter().next()
 }
 
 pub fn is_musl_system() -> bool {
