@@ -646,6 +646,33 @@ pub fn find_tool_entry<'a>(
     }
 }
 
+pub fn find_all_executables_in_tool_dir(executable_path: &str, os_system: &str) -> Vec<String> {
+    let exec_path = std::path::Path::new(executable_path);
+    let parent = match exec_path.parent() {
+        Some(p) => p,
+        None => return vec![],
+    };
+
+    let mut executables = std::collections::HashSet::new();
+
+    for entry in walkdir::WalkDir::new(parent)
+        .max_depth(2)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+        if path.is_file() && crate::download::is_executable(path, os_system) {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                executables.insert(name.to_string());
+            }
+        }
+    }
+
+    let mut result: Vec<String> = executables.into_iter().collect();
+    result.sort();
+    result
+}
+
 pub fn find_tool_executable(config: &ToolerConfig, tool_query: &str) -> Option<ToolInfo> {
     let (_, base_info) = find_tool_entry(config, tool_query)?;
     let mut info = base_info.clone();

@@ -100,6 +100,17 @@ pub enum Commands {
         tool_id: String,
     },
 
+    /// Manage tool aliases
+    Alias {
+        /// Alias name (e.g., 'gh')
+        name: String,
+        /// Target repository or URL (e.g., 'cli/cli')
+        target: Option<String>,
+        /// Remove the alias
+        #[arg(short, long)]
+        remove: bool,
+    },
+
     /// Manage tooler's configuration
     Config {
         #[command(subcommand)]
@@ -137,15 +148,5 @@ pub enum ConfigAction {
         /// Output format (json, yaml, plain)
         #[arg(long, default_value = "plain")]
         format: String,
-    },
-    /// Manage tool aliases
-    Alias {
-        /// Alias name (e.g., 'gh')
-        name: String,
-        /// Target repository or URL (e.g., 'cli/cli')
-        target: Option<String>,
-        /// Remove the alias
-        #[arg(short, long)]
-        remove: bool,
     },
 }

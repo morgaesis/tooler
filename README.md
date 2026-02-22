@@ -15,6 +15,7 @@ A CLI tool manager for GitHub Releases written in Rust.
 - **Update Checking**: Automatically checks for tool updates
 - **Configuration**: Persistent configuration with environment variable overrides
 - **Version Pinning**: Pin tools to specific versions to prevent auto-updates
+- **Aliases**: Create short aliases for tools with `tooler alias <name> <target>`
 - **Complex Version Support**: Handle GitHub release tags with slashes (e.g., [infisical-cli/v0.41.90](https://github.com/Infisical/infisical/releases/tag/infisical-cli/v0.41.90))
 
 ![Tooler Demo](./assets/demo.svg)
@@ -66,6 +67,10 @@ gh --version # Or just use the auto-shimmed binary
 # Tools like Helm that host binaries externally (release body parsing)
 tooler pull helm/helm
 helm version
+
+# Create aliases for shorter tool names
+tooler alias cmk cloudstack-cloudmonkey
+tooler run cmk --version
 ```
 
 ### Release Body Parsing

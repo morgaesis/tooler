@@ -13,8 +13,8 @@ use cli::{Cli, Commands, ConfigAction};
 use config::{load_tool_configs, normalize_key, save_tool_configs};
 use download::is_executable;
 use install::{
-    check_for_updates, find_tool_entry, find_tool_executable, install_or_update_tool,
-    list_installed_tools, pin_tool, remove_tool,
+    check_for_updates, find_all_executables_in_tool_dir, find_tool_entry, find_tool_executable,
+    install_or_update_tool, list_installed_tools, pin_tool, remove_tool,
 };
 use std::env;
 use std::fs;
@@ -419,34 +419,38 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            ConfigAction::Alias {
-                name,
-                target,
-                remove,
-            } => {
-                if remove {
-                    if config.aliases.remove(&name).is_some() {
-                        save_tool_configs(&config)?;
-                        tracing::info!("Alias '{}' removed", name);
-                    } else {
-                        tracing::warn!("Alias '{}' not found", name);
-                    }
-                } else if let Some(target) = target {
-                    config.aliases.insert(name.clone(), target.clone());
-                    save_tool_configs(&config)?;
-                    tracing::info!("Alias '{}' set to '{}'", name, target);
-                } else if let Some(target) = config.aliases.get(&name) {
-                    println!("{} -> {}", name, target);
-                } else {
-                    return Err(anyhow!("Alias '{}' not found", name));
-                }
-            }
         },
         Commands::Pin { tool_id } => {
             pin_tool(&mut config, &tool_id)?;
         }
+        Commands::Alias {
+            name,
+            target,
+            remove,
+        } => {
+            if remove {
+                if config.aliases.remove(&name).is_some() {
+                    save_tool_configs(&config)?;
+                    tracing::info!("Alias '{}' removed", name);
+                } else {
+                    tracing::warn!("Alias '{}' not found", name);
+                }
+            } else if let Some(target) = target {
+                config.aliases.insert(name.clone(), target.clone());
+                save_tool_configs(&config)?;
+                tracing::info!("Alias '{}' set to '{}'", name, target);
+            } else if let Some(target) = config.aliases.get(&name) {
+                println!("{} -> {}", name, target);
+            } else {
+                return Err(anyhow!("Alias '{}' not found", name));
+            }
+        }
         Commands::Info { tool_id } => {
             if let Some(info) = find_tool_executable(&config, &tool_id) {
+                let system_info = platform::get_system_info();
+                let all_binaries =
+                    find_all_executables_in_tool_dir(&info.executable_path, &system_info.os);
+
                 println!("--- Tool Information ---");
                 println!("  Name:          {}", info.tool_name);
                 println!("  Repository:    {}", info.repo);
@@ -455,6 +459,7 @@ async fn main() -> Result<()> {
                 println!("  Last accessed: {}", info.last_accessed);
                 println!("  Install type:  {}", info.install_type);
                 println!("  Pinned:        {}", info.pinned);
+                println!("  Binaries:      {}", all_binaries.join(", "));
                 println!("  Path:          {}", info.executable_path);
                 println!("------------------------");
             } else {
