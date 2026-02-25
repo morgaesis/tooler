@@ -443,7 +443,22 @@ pub fn pin_tool(config: &mut ToolerConfig, tool_id: &str) -> Result<()> {
 }
 
 pub fn remove_tool(config: &mut ToolerConfig, key: &str) -> Result<()> {
-    if config.tools.remove(key).is_some() {
+    if let Some(tool_info) = config.tools.remove(key) {
+        // Delete the tool files from disk
+        let exec_path = std::path::Path::new(&tool_info.executable_path);
+        if let Some(parent_dir) = exec_path.parent() {
+            if parent_dir.exists() {
+                tracing::debug!("Removing tool directory: {}", parent_dir.display());
+                if let Err(e) = fs::remove_dir_all(parent_dir) {
+                    tracing::warn!(
+                        "Failed to remove tool directory '{}': {}",
+                        parent_dir.display(),
+                        e
+                    );
+                }
+            }
+        }
+
         save_tool_configs(config)?;
         tracing::info!("Tool {} removed", key);
         Ok(())

@@ -44,11 +44,13 @@ pub fn find_asset_for_platform(
     ];
 
     let arch_aliases = [
-        ("x86_64", vec!["amd64", "x64", "x86_64"]),
-        ("amd64", vec!["amd64", "x64", "x86_64"]), // Add amd64 as key since get_system_info normalizes x86_64 to amd64
+        ("x86_64", vec!["amd64", "x64", "x86_64", "x86-64"]),
+        ("amd64", vec!["amd64", "x64", "x86_64", "x86-64"]),
         ("aarch64", vec!["arm64", "aarch64"]),
-        ("arm64", vec!["arm64", "aarch64"]), // Add arm64 as key since get_system_info normalizes aarch64 to arm64
+        ("arm64", vec!["arm64", "aarch64"]),
         ("arm", vec!["arm", "armv7"]),
+        ("i686", vec!["i686", "i386", "x86"]),
+        ("i386", vec!["i686", "i386", "x86"]),
     ];
 
     tracing::trace!("Available arch aliases: {:?}", arch_aliases);
@@ -80,6 +82,8 @@ pub fn find_asset_for_platform(
 
     let priority_order = vec!["os_arch_archive", "os_arch_binary", "os_arch_package"];
 
+    let is_64bit_system = matches!(system_arch, "x86_64" | "amd64" | "aarch64" | "arm64");
+
     for category in priority_order {
         if let Some(asset_list) = candidates.remove(category) {
             // Filter assets by exact OS and architecture match
@@ -87,6 +91,22 @@ pub fn find_asset_for_platform(
                 .iter()
                 .filter(|asset| {
                     let name_lower = asset.name.to_lowercase();
+
+                    // Reject 32-bit assets on 64-bit systems unless explicitly needed
+                    if is_64bit_system {
+                        let is_32bit = name_lower.contains("i686")
+                            || name_lower.contains("i386")
+                            || name_lower.contains("i586")
+                            || name_lower.contains("i486");
+                        if is_32bit {
+                            tracing::debug!(
+                                "Skipping 32-bit asset '{}' on 64-bit system",
+                                asset.name
+                            );
+                            return false;
+                        }
+                    }
+
                     let os_match = os_aliases.iter().any(|(os, aliases)| {
                         os == &system_os && aliases.iter().any(|alias| name_lower.contains(alias))
                     });
@@ -270,11 +290,13 @@ pub fn find_asset_in_release_body(
     ];
 
     let arch_aliases = [
-        ("x86_64", vec!["amd64", "x64", "x86_64"]),
-        ("amd64", vec!["amd64", "x64", "x86_64"]),
+        ("x86_64", vec!["amd64", "x64", "x86_64", "x86-64"]),
+        ("amd64", vec!["amd64", "x64", "x86_64", "x86-64"]),
         ("aarch64", vec!["arm64", "aarch64"]),
         ("arm64", vec!["arm64", "aarch64"]),
         ("arm", vec!["arm", "armv7"]),
+        ("i686", vec!["i686", "i386", "x86"]),
+        ("i386", vec!["i686", "i386", "x86"]),
     ];
 
     let valid_extensions = [".tar.gz", ".zip", ".tar.xz", ".tgz", ".gz"];
@@ -283,6 +305,8 @@ pub fn find_asset_in_release_body(
     let md_link_regex = regex::Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").ok()?;
 
     let mut candidates: Vec<AssetInfo> = Vec::new();
+
+    let is_64bit_system = matches!(system_arch, "x86_64" | "amd64" | "aarch64" | "arm64");
 
     for cap in md_link_regex.captures_iter(body) {
         let link_text = cap.get(1)?.as_str().to_lowercase();
@@ -295,6 +319,17 @@ pub fn find_asset_in_release_body(
 
         if !valid_extensions.iter().any(|ext| url_lower.ends_with(ext)) {
             continue;
+        }
+
+        // Reject 32-bit assets on 64-bit systems
+        if is_64bit_system {
+            let is_32bit = url_lower.contains("i686")
+                || url_lower.contains("i386")
+                || url_lower.contains("i586")
+                || url_lower.contains("i486");
+            if is_32bit {
+                continue;
+            }
         }
 
         let url_filename = url.split('/').next_back().unwrap_or("");

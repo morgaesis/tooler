@@ -71,9 +71,13 @@ pub enum Commands {
     },
 
     /// Pull latest version of a tool without updating existing installation
+    #[command(alias = "install")]
     Pull {
         /// Tool to pull (e.g., 'owner/repo' or 'tool-name')
         tool_id: String,
+        /// Explicitly specify asset name from the release to download
+        #[arg(long)]
+        asset: Option<String>,
         /// Parse release body for download URLs when assets don't match platform
         #[arg(long, overrides_with = "no_parse_release_body")]
         parse_release_body: bool,

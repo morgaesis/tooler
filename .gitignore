@@ -218,3 +218,6 @@ __marimo__/
 !/AGENTS.md
 !/ARCHITECTURE.md
 !/ROADMAP.md
+
+# GSD files
+.planning/

@@ -179,6 +179,7 @@ async fn main() -> Result<()> {
         }
         Commands::Pull {
             tool_id,
+            asset,
             parse_release_body,
             no_parse_release_body,
         } => {
@@ -209,7 +210,9 @@ async fn main() -> Result<()> {
             } else {
                 None
             };
-            match install_or_update_tool(&mut config, &tool_id, true, None, parse_body).await {
+            match install_or_update_tool(&mut config, &tool_id, true, asset.as_deref(), parse_body)
+                .await
+            {
                 Ok(path) => {
                     tracing::info!("Successfully pulled {} to {}", tool_id, path.display());
                     if config.settings.auto_shim && !cfg!(windows) {
@@ -446,7 +449,26 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Info { tool_id } => {
-            if let Some(info) = find_tool_executable(&config, &tool_id) {
+            let mut info = find_tool_executable(&config, &tool_id);
+
+            // Recovery: If tool not found in config, try to discover it locally
+            if info.is_none() {
+                if let Ok(Some(recovered)) = install::try_recover_tool(&tool_id) {
+                    eprintln!(
+                        "Recovered tool {} (v{}) from local installation.",
+                        tool_id, recovered.version
+                    );
+                    let key = ToolIdentifier::parse(&recovered.repo)
+                        .map_err(|e| anyhow!(e))?
+                        .config_key();
+
+                    let mut updated_config = config.clone();
+                    updated_config.tools.insert(key, recovered);
+                    info = find_tool_executable(&updated_config, &tool_id);
+                }
+            }
+
+            if let Some(info) = info {
                 let system_info = platform::get_system_info();
                 let all_binaries =
                     find_all_executables_in_tool_dir(&info.executable_path, &system_info.os);
