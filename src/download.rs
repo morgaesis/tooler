@@ -129,6 +129,12 @@ fn extract_zip(archive_path: &Path, extract_dir: &Path) -> Result<()> {
             }
             let mut outfile = fs::File::create(&outpath)?;
             io::copy(&mut file, &mut outfile)?;
+
+            #[cfg(unix)]
+            if let Some(mode) = file.unix_mode() {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&outpath, fs::Permissions::from_mode(mode))?;
+            }
         }
     }
 
