@@ -1144,4 +1144,65 @@ mod tests {
         assert_eq!(found_alias_multi.repo, "kubernetes/kubectl");
         assert!(found_alias_multi.executable_path.ends_with("kubeadm"));
     }
+
+    #[test]
+    fn test_platform_suffixed_binary_discovery() {
+        // Simulates apache/cloudstack-cloudmonkey where the binary is "cmk.linux.x86-64"
+        let mut config = ToolerConfig::default();
+        let now = Utc::now().to_rfc3339();
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let cmk_binary = temp_dir.path().join("cmk.linux.x86-64");
+
+        std::fs::write(&cmk_binary, "cmk binary").unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cmk_binary, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        let info = ToolInfo {
+            tool_name: "cloudstack-cloudmonkey".to_string(),
+            repo: "apache/cloudstack-cloudmonkey".to_string(),
+            version: "6.5.0".to_string(),
+            executable_path: cmk_binary.to_string_lossy().to_string(),
+            install_type: "binary".to_string(),
+            pinned: false,
+            installed_at: now.clone(),
+            last_accessed: now.clone(),
+            last_checked: None,
+            forge: crate::types::Forge::GitHub,
+            original_url: None,
+        };
+
+        config
+            .tools
+            .insert("apache/cloudstack-cloudmonkey@latest".to_string(), info);
+
+        // 1. Find by full repo name
+        let found = find_tool_executable(&config, "apache/cloudstack-cloudmonkey").unwrap();
+        assert_eq!(found.repo, "apache/cloudstack-cloudmonkey");
+
+        // 2. Find by short name "cmk" via deep search (matches cmk.linux.x86-64)
+        let found_cmk = find_tool_executable(&config, "cmk");
+        assert!(
+            found_cmk.is_some(),
+            "Expected 'cmk' to match 'cmk.linux.x86-64' via deep search"
+        );
+        let found_cmk = found_cmk.unwrap();
+        assert_eq!(found_cmk.repo, "apache/cloudstack-cloudmonkey");
+        assert!(found_cmk.executable_path.contains("cmk.linux.x86-64"));
+
+        // 3. Alias should also work
+        config
+            .aliases
+            .insert("cloudmonkey".to_string(), "cmk".to_string());
+        let found_alias = find_tool_executable(&config, "cloudmonkey");
+        assert!(
+            found_alias.is_some(),
+            "Expected alias 'cloudmonkey' -> 'cmk' to resolve"
+        );
+        assert_eq!(found_alias.unwrap().repo, "apache/cloudstack-cloudmonkey");
+    }
 }

@@ -106,10 +106,12 @@ tooler config show --format json
 # Get a specific setting
 tooler config get update-check-days
 
-# Set a setting (both formats supported)
-tooler config set auto-shim=true
-tooler config set auto-update true
-tooler config set updateCheckDays 14
+# Set a setting (both formats supported, kebab/snake/camel accepted)
+tooler config set update-check-days 14  # default: 60
+tooler config set auto-shim false       # default: true
+tooler config set auto-update false     # default: true
+tooler config set parse-release-body false  # default: true
+tooler config set bin-dir ~/.local/share/tooler/bin  # default: ~/.local/share/tooler/bin
 
 # Unset a setting (revert to default)
 tooler config unset auto-shim
