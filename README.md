@@ -156,10 +156,11 @@ cargo build --release
 
 ### Generating Demo Animation
 
-The animated demo is generated using [VHS](https://github.com/charmbracelet/vhs):
+The demo SVG is recorded with `asciinema` in an isolated tooler environment and converted with `svg-term-cli`:
 
 ```bash
-vhs demo.tape
+# Requires: asciinema, svg-term-cli (npm i -g svg-term-cli)
+./scripts/gen-demo.sh
 ```
 
 ## License
