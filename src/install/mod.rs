@@ -595,13 +595,7 @@ pub fn find_tool_entry<'a>(
                 // Deep search: check for other binaries in the same directory
                 let exec_path = std::path::Path::new(&info.executable_path);
                 if let Some(parent) = exec_path.parent() {
-                    let candidate = parent.join(tool_identifier.tool_name());
-                    if candidate.exists()
-                        && crate::download::is_executable(
-                            &candidate,
-                            &crate::platform::get_system_info().os,
-                        )
-                    {
+                    if has_matching_binary(parent, &tool_identifier.tool_name()) {
                         return version_matches(requested_version, &info.version);
                     }
                 }
@@ -644,13 +638,7 @@ pub fn find_tool_entry<'a>(
                 // Deep search: check for other binaries in the same directory
                 let exec_path = std::path::Path::new(&info.executable_path);
                 if let Some(parent) = exec_path.parent() {
-                    let candidate = parent.join(tool_identifier.tool_name());
-                    if candidate.exists()
-                        && crate::download::is_executable(
-                            &candidate,
-                            &crate::platform::get_system_info().os,
-                        )
-                    {
+                    if has_matching_binary(parent, &tool_identifier.tool_name()) {
                         return true;
                     }
                 }
@@ -659,6 +647,40 @@ pub fn find_tool_entry<'a>(
             })
             .max_by_key(|(_, info)| &info.last_accessed)
     }
+}
+
+/// Check if a directory contains an executable whose name starts with `target_name`.
+/// Handles cases like "cmk.linux.x86-64" matching a search for "cmk".
+fn has_matching_binary(dir: &std::path::Path, target_name: &str) -> bool {
+    let target_lower = target_name.to_lowercase();
+    let system_info = crate::platform::get_system_info();
+
+    // Exact match first
+    let candidate = dir.join(target_name);
+    if candidate.exists() && crate::download::is_executable(&candidate, &system_info.os) {
+        return true;
+    }
+
+    // Prefix match: find files like "cmk.linux.x86-64" for query "cmk"
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        // Match "cmk.linux.x86-64" or "cmk-linux-amd64" for query "cmk"
+        let stem = name.split(['.', '-', '_']).next().unwrap_or("");
+        if stem == target_lower && crate::download::is_executable(&path, &system_info.os) {
+            return true;
+        }
+    }
+    false
 }
 
 pub fn find_all_executables_in_tool_dir(executable_path: &str, os_system: &str) -> Vec<String> {

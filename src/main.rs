@@ -135,7 +135,10 @@ async fn main() -> Result<()> {
 
                     tracing::info!("Attempting to update {}...", repo);
                     match install_or_update_tool(&mut config, &repo, true, None, None).await {
-                        Ok(_) => tracing::info!("{} updated successfully", tool_id),
+                        Ok(path) => {
+                            handle_self_update(&path, &repo)?;
+                            tracing::info!("{} updated successfully", tool_id);
+                        }
                         Err(e) => {
                             tracing::error!("Failed to update tool '{}': {}", tool_id, e);
                             if e.to_string().contains("404") {
@@ -214,11 +217,28 @@ async fn main() -> Result<()> {
                 .await
             {
                 Ok(path) => {
+                    handle_self_update(&path, &tool_id)?;
                     tracing::info!("Successfully pulled {} to {}", tool_id, path.display());
                     if config.settings.auto_shim && !cfg!(windows) {
                         let bin_dir = &config.settings.bin_dir;
                         create_shim_script(bin_dir)?;
                         create_tool_symlink(bin_dir, &tool_identifier.tool_name())?;
+
+                        // Also create symlinks for all other binaries in the tool directory
+                        let system_info = platform::get_system_info();
+                        let all_binaries = find_all_executables_in_tool_dir(
+                            &path.to_string_lossy(),
+                            &system_info.os,
+                        );
+                        for binary in &all_binaries {
+                            create_tool_symlink(bin_dir, binary)?;
+                            // Also create a symlink for the base name
+                            // e.g. "cmk.linux.x86-64" -> "cmk", "wt" stays "wt"
+                            let base = strip_platform_suffix(binary);
+                            if base != *binary {
+                                create_tool_symlink(bin_dir, &base)?;
+                            }
+                        }
                     }
                 }
                 Err(e) => {
@@ -663,6 +683,14 @@ async fn execute_run(
             let bin_dir = &config.settings.bin_dir;
             create_shim_script(bin_dir)?;
             create_tool_symlink(bin_dir, &tool_identifier.tool_name())?;
+
+            // Also create symlinks for all other binaries in the tool directory
+            let system_info = platform::get_system_info();
+            let all_binaries =
+                find_all_executables_in_tool_dir(&info.executable_path, &system_info.os);
+            for binary in &all_binaries {
+                create_tool_symlink(bin_dir, binary)?;
+            }
         }
 
         // Update last accessed time
@@ -777,6 +805,82 @@ fn create_shim_script(bin_dir: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Strip platform-specific suffixes from a binary name.
+/// e.g. "cmk.linux.x86-64" -> "cmk", "tool-linux-amd64" -> "tool"
+/// but "wt-cli" stays "wt-cli" (no platform tokens).
+fn strip_platform_suffix(name: &str) -> String {
+    let platform_tokens = [
+        "linux", "darwin", "macos", "windows", "win", "win32", "win64", "amd64", "x86_64",
+        "x86-64", "arm64", "aarch64", "armv7", "i386", "i686", "gnu", "musl", "msvc",
+    ];
+
+    // Split on dots and dashes, keep segments that aren't platform tokens
+    let parts: Vec<&str> = name.split('.').collect();
+    if parts.len() > 1 {
+        // Try stripping dot-separated platform tokens from the end
+        let mut keep = parts.len();
+        for i in (1..parts.len()).rev() {
+            let segment_lower = parts[i].to_lowercase();
+            // Check if this segment or any dash-separated part is a platform token
+            let is_platform = segment_lower
+                .split('-')
+                .all(|p| platform_tokens.contains(&p) || p.chars().all(|c| c.is_ascii_digit()));
+            if is_platform {
+                keep = i;
+            } else {
+                break;
+            }
+        }
+        if keep < parts.len() {
+            return parts[..keep].join(".");
+        }
+    }
+
+    name.to_string()
+}
+
+/// Check if a tool identifier refers to tooler itself, and if so, replace the
+/// currently running binary with the newly downloaded one.
+fn handle_self_update(new_executable: &Path, tool_id: &str) -> Result<bool> {
+    let tool_identifier = match ToolIdentifier::parse(tool_id) {
+        Ok(id) => id,
+        Err(_) => return Ok(false),
+    };
+
+    let is_self = tool_identifier.tool_name() == "tooler"
+        && (tool_identifier.author == "morgaesis" || tool_identifier.author == "unknown");
+
+    if !is_self {
+        return Ok(false);
+    }
+
+    let current_exe = env::current_exe()?;
+    tracing::info!(
+        "Self-update: replacing {} with {}",
+        current_exe.display(),
+        new_executable.display()
+    );
+
+    // On Unix, we can replace the running binary by writing to a new file and renaming.
+    // The old inode stays alive until the process exits.
+    let tmp_path = current_exe.with_extension("new");
+    fs::copy(new_executable, &tmp_path)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&tmp_path)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&tmp_path, perms)?;
+    }
+
+    fs::rename(&tmp_path, &current_exe)?;
+    tracing::info!("Self-update complete. Restart tooler to use the new version.");
+    eprintln!("Self-update complete. Restart tooler to use the new version.");
+
+    Ok(true)
 }
 
 fn create_tool_symlink(bin_dir: &str, tool_name: &str) -> Result<()> {

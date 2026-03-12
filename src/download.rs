@@ -243,11 +243,17 @@ pub fn find_executable_in_extracted(
                 score += 20;
             }
 
+            // Extract the base name (first segment before dots/dashes/underscores)
+            // e.g. "cmk.linux.x86-64" -> "cmk"
+            let file_base = file_name.split(['.', '-', '_']).next().unwrap_or("");
+
             // Higher score for exact name match with tool/repo parts
             if target_names.contains(&file_name) {
                 score += 100;
             } else if target_names.contains(&file_stem) {
                 score += 90;
+            } else if !file_base.is_empty() && target_names.iter().any(|t| t == file_base) {
+                score += 85;
             }
 
             // Bonus for matching parts of the asset name (very strong signal)
