@@ -22,25 +22,15 @@ A CLI tool manager for GitHub Releases written in Rust.
 
 ## Installation
 
-### Bootstrapped
-
 ```bash
+# Bootstrap (if tooler is already installed)
 tooler pull morgaesis/tooler
-```
 
-### Quick Install (curl-pipe)
-
-```bash
+# Or install from scratch
 curl -sSL https://raw.githubusercontent.com/morgaesis/tooler/main/install.sh | bash
 ```
 
-### From Source
-
-```bash
-git clone https://github.com/morgaesis/tooler
-cd tooler
-cargo install --path .
-```
+See [INSTALL.md](INSTALL.md) for platform details, from-source builds, and troubleshooting.
 
 ## Usage
 
@@ -164,12 +154,10 @@ cargo build --release
 
 ### Generating Demo Animation
 
-The animated demo in the README is generated using `scripts/gen_demo.js` and `svg-term-cli`.
+The animated demo is generated using [VHS](https://github.com/charmbracelet/vhs):
 
 ```bash
-node scripts/gen_demo.js
-npx svg-term-cli --in demo.cast --out assets/demo.svg --window
-rm demo.cast
+vhs demo.tape
 ```
 
 ## License
