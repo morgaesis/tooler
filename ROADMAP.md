@@ -3,7 +3,7 @@
 ## Status Legend
 
 - 🔴 **Critical**: Security vulnerabilities requiring immediate attention
-- 🟠 **High**: Significant functionality or architectural issues  
+- 🟠 **High**: Significant functionality or architectural issues
 - 🟡 **Medium**: Improvements and enhancements
 - 🟢 **Low**: Nice-to-have features
 - ✅ **Complete**: Finished items
@@ -12,20 +12,14 @@
 
 ## Critical Priority (Security)
 
-### 🔴 Path Traversal in Tar Archive Extraction
-- **File**: `src/download.rs` (lines 138-174)
-- **Issue**: ZIP extraction has path traversal protection, but tar.gz/tar.xz do not
-- **Risk**: Malicious archives can write files outside intended directory (e.g., `../../../.bashrc`)
-- **Fix**: Implement same path validation for tar archives as exists for ZIP
-
-### 🔴 Install Script Lacks Verification  
+### 🔴 Install Script Lacks Verification
 - **File**: `install.sh`
 - **Issue**: Downloads and executes binaries without checksum verification
 - **Risk**: Man-in-the-middle attacks or compromised GitHub releases
 - **Fix**: Add SHA256 checksum verification using GitHub's published checksums
 
 ### 🔴 No Download Integrity Verification
-- **File**: `src/main.rs` (tool execution)
+- **File**: `src/install/mod.rs` (install_or_update_tool)
 - **Issue**: Executes downloaded binaries without cryptographic verification
 - **Risk**: Tampered releases from compromised maintainer accounts
 - **Fix**: Implement trust-on-first-use (TOFU) with stored checksums, verify when available
@@ -34,35 +28,27 @@
 
 ## High Priority (Architecture & Maintainability)
 
-### 🟠 Refactor Large Source Files
-- **Target**: `src/install.rs` (1110 lines), `src/main.rs` (650+ lines)
-- **Issue**: Excessive complexity creates security fix risk and hinders testing
-- **Structure**:
+### 🟠 Continue Refactoring Large Source Files
+- **Current state**: `src/install/mod.rs` (1147 lines), `src/main.rs` (910 lines)
+- **Progress**: `install.rs` was split into `install/mod.rs` + `install/github.rs`, but both files remain large
+- **Remaining work**:
   ```
   src/
-    main.rs              # Entry point only
-    cli.rs               # Command definitions (already exists)
-    config.rs            # Configuration management (already exists)
-    download.rs          # Download logic (already exists)
+    main.rs              # Still 910 lines; extract shim/symlink/self-update logic
     install/
-      mod.rs             # Public interface
-      core.rs            # Main installation orchestration
-      github.rs          # GitHub API interaction
-      recovery.rs        # Self-healing from filesystem
-      updates.rs         # Update checking logic
-      version.rs         # Version matching and comparison
-      list.rs            # Tool listing/display
-    tool_id.rs           # Tool identifier parsing (already exists)
-    types.rs             # Type definitions (already exists)
-    platform.rs          # Platform detection (already exists)
-    shim.rs              # Shim script management (extract from main.rs)
+      mod.rs             # Still 1147 lines; split further:
+        core.rs          # Installation orchestration (install_or_update_tool)
+        recovery.rs      # Self-healing (try_recover_tool, recover_all_installed_tools)
+        updates.rs       # Update checking (check_for_updates)
+        version.rs       # Version matching (version_matches, find_highest_version)
+        list.rs          # Tool listing/display (list_installed_tools)
+    shim.rs              # Extract from main.rs: create_shim_script, create_tool_symlink, strip_platform_suffix
     security.rs          # Security utilities (path validation, checksums)
   ```
-- **Tests**: All tests in `test_*.rs` files, either adjacent to source or in `tests/` directory
 
 ### 🟠 Fix Stringly-Typed Version Handling
-- **Issue**: String sentinel values "default" and "latest" used inconsistently (led to recent bug)
-- **Recent Bug**: "default" version was passed to GitHub API as literal tag name
+- **File**: `src/tool_id.rs` (line 85: `Some("default".to_string())`)
+- **Issue**: String sentinel values "default" and "latest" used inconsistently (led to bug fixed in v0.6.2)
 - **Fix**: Refactor `version: Option<String>` to typed enum:
   ```rust
   pub enum Version {
@@ -73,8 +59,8 @@
 - **Benefit**: Compile-time prevention of invalid states
 
 ### 🟠 Extract Duplicate Error Handling
-- **File**: `src/main.rs` (lines 105-111, 165-176, 191-216, 488-511)
-- **Issue**: Same 404 error handling logic duplicated 4+ times
+- **File**: `src/main.rs` (Pull handler lines 246-282, execute_run lines 617-641)
+- **Issue**: `GitHubReleaseError` match arms duplicated in Pull and execute_run
 - **Fix**: Create helper function `handle_install_error()`
 
 ### 🟠 Define Constants for Magic Values
@@ -93,31 +79,31 @@
 ## Medium Priority (Enhancements)
 
 ### 🟡 File Permission Race Condition
-- **File**: `src/download.rs` (lines 338-342)
-- **Issue**: Permissions set after download, leaving window where file is world-readable
+- **File**: `src/download.rs` (line 34: `fs::File::create`)
+- **Issue**: Downloaded file is world-readable until permissions are set after extraction
 - **Fix**: Set restrictive permissions (0o600) on creation, finalize after download
 
 ### 🟡 Information Disclosure in Errors
 - **File**: Multiple locations in `src/main.rs`
-- **Issue**: Error messages reveal internal paths
+- **Issue**: Error messages reveal internal paths (executable_path shown in logs)
 - **Fix**: Sanitize paths in user-facing errors, use relative paths or tool names only
 
 ### 🟡 Unbounded Redirect Following
-- **File**: `src/download.rs` (line 17)
-- **Issue**: No limit on HTTP redirects during download
-- **Fix**: Configure reqwest with max 10 redirects
+- **File**: `src/download.rs` (line 17: `reqwest::get(url)`)
+- **Issue**: No limit on HTTP redirects during download (uses reqwest default)
+- **Fix**: Build a `reqwest::Client` with explicit max 10 redirects
 
 ### 🟡 TLS Configuration Options
 - **Issue**: No way to configure certificate validation for corporate proxies
 - **Fix**: Add `TOOLER_CA_BUNDLE` and `TOOLER_NO_VERIFY_TLS` (with warnings) environment variables
 
 ### 🟡 Download Size Limits
-- **Issue**: No maximum file size limit - malicious releases could exhaust disk space
+- **Issue**: No maximum file size limit; malicious releases could exhaust disk space
 - **Fix**: Add 500MB default limit, configurable via `TOOLER_MAX_DOWNLOAD_SIZE`
 
 ### 🟡 Tool Name Sanitization
-- **File**: `src/main.rs` (shim creation)
-- **Issue**: Tool names used in shell scripts without validation
+- **File**: `src/main.rs` (create_tool_symlink, create_shim_script)
+- **Issue**: Tool names used in shell scripts and symlink paths without validation
 - **Fix**: Validate tool names contain only alphanumeric, hyphens, and underscores
 
 ### 🟡 Refined Version Recovery
@@ -125,7 +111,8 @@
 - **Related**: Properly handle complex GitHub tag formats
 
 ### 🟡 Deduce Install Type
-- **Issue**: When recovering tools from filesystem, install type detection is heuristic-based
+- **File**: `src/install/mod.rs` (lines 877-888)
+- **Issue**: When recovering tools from filesystem, install type detection relies on file count heuristic (<=3 files = binary)
 - **Fix**: Store install type metadata more reliably, improve detection logic
 
 ---
@@ -133,22 +120,22 @@
 ## Low Priority (Cleanup)
 
 ### 🟢 Dead Code Removal
-- **Functions**: `find_highest_version()` (install.rs:527), `api_version()` (tool_id.rs:127)
-- **Status**: Marked `#[allow(dead_code)]` but never used
+- **Functions**: `find_highest_version()` (`src/install/mod.rs:541`), `api_version()` (`src/tool_id.rs:127`)
+- **Status**: Marked `#[allow(dead_code)]` but never called outside tests
 - **Action**: Remove or properly integrate
 
 ### 🟢 Test File Cleanup
 - **File**: `tests/test_version.rs`
-- **Issue**: Contains only helper code, named confusingly
-- **Fix**: Rename to `version_helper.rs` or merge into `common.rs`
+- **Issue**: Contains only a standalone `main()` function with a copy of `version_matches()` logic; not a real test module
+- **Fix**: Remove or convert to a proper unit test
 
 ### 🟢 Implement URL Version Discovery
-- **File**: `src/install.rs` (line 411)
-- **Issue**: `discover_url_versions()` is empty stub
-- **Action**: Implement or remove if not needed
+- **File**: `src/install/github.rs` (line 96)
+- **Issue**: `discover_url_versions()` is an empty stub returning `Ok(vec![])`
+- **Action**: Implement directory scraping or remove if not needed
 
 ### 🟢 Don't Call GitHub for Unknown Tools
-- **Issue**: `tooler run foo` (unqualified) makes GitHub API call that gives 404
+- **Issue**: `tooler run foo` (unqualified name without `/`) makes GitHub API call that returns 404
 - **Fix**: Check if tool exists locally or is qualified (has `/`) before calling GitHub
 
 ### 🟢 GitHub Tag Lookups
@@ -157,9 +144,18 @@
 
 ---
 
-## Completed ✅
+## Completed
 
-### Recently Fixed (2026-02-02)
+### v0.6.3 (2026-03)
+- ✅ **Path Traversal Protection for Tar Archives**: Added `starts_with(extract_dir)` validation to both `extract_tar_gz` and `extract_tar_xz` in `src/download.rs`, matching the existing ZIP protection
+- ✅ **Self-Update**: `tooler update tooler` replaces the running binary via `handle_self_update()` in `src/main.rs`
+- ✅ **Multi-Binary Symlinks**: `pull` and `run` create symlinks for all executables found in the tool directory, not just the primary binary
+- ✅ **Platform Suffix Stripping**: `strip_platform_suffix()` extracts base tool names (e.g., `cmk.linux.x86-64` becomes `cmk`) for cleaner symlinks
+- ✅ **Deep Search Improvements**: `find_tool_entry` and `has_matching_binary` match binaries with platform suffixes (e.g., searching for "cmk" finds `cmk.linux.x86-64`)
+- ✅ **Install Script Improvements**: `install.sh` tries `gh` CLI first for authenticated API access, provides rate limit error guidance, and bootstraps self-update via `tooler pull morgaesis/tooler`
+- ✅ **Initial install.rs Split**: Extracted `src/install/github.rs` from monolithic `src/install.rs` into `src/install/` module structure
+
+### v0.6.2 (2026-02-02)
 - ✅ **"default" Version Bug**: Fixed 404 error when running tools without explicit version
   - Added `build_gh_release_url()` function with proper version handling
   - Added unit tests for all version cases
@@ -197,8 +193,8 @@
 ## Test Coverage Gaps
 
 ### Security-Relevant Missing Tests
-1. Path traversal attempts in archives
-2. Checksum verification failure handling
+1. Path traversal attempts in archives (protection exists but no test)
+2. Checksum verification failure handling (not yet implemented)
 3. Tool name sanitization (malicious names)
 4. Permission error handling (read-only filesystems)
 5. Concurrent installation race conditions

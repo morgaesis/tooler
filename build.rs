@@ -1,3 +1,7 @@
+//! Build script that embeds git metadata (commit, branch, tag) into the binary.
+//! These are exposed as compile-time environment variables (TOOLER_GIT_COMMIT,
+//! TOOLER_GIT_BRANCH, TOOLER_GIT_TAG) and used by the `version` command.
+
 use std::process::Command;
 
 fn main() {
