@@ -242,35 +242,9 @@ async fn main() -> Result<()> {
                     }
                 }
                 Err(e) => {
-                    tracing::error!("Failed to install tool '{}': {}", tool_id, e);
                     if let Some(gh_error) = e.downcast_ref::<install::github::GitHubReleaseError>()
                     {
-                        match gh_error {
-                            install::github::GitHubReleaseError::TagNotFound { repo, version } => {
-                                eprintln!(
-                                    "\nError: Release tag '{}' not found in {}.",
-                                    version, repo
-                                );
-                                eprintln!(
-                                    "Check available tags at: https://github.com/{}/tags",
-                                    repo
-                                );
-                            }
-                            install::github::GitHubReleaseError::LatestNotFound { repo } => {
-                                eprintln!("\nError: No releases found for {}.", repo);
-                                eprintln!(
-                                    "Check available tags at: https://github.com/{}/tags",
-                                    repo
-                                );
-                            }
-                            install::github::GitHubReleaseError::RequestFailed { repo, .. } => {
-                                eprintln!("\nError: {}", gh_error);
-                                eprintln!(
-                                    "Check available tags at: https://github.com/{}/tags",
-                                    repo
-                                );
-                            }
-                        }
+                        display_github_error(&tool_id, gh_error);
                     } else if tool_identifier.forge == types::Forge::Url {
                         eprintln!("\nError: Tool '{}' could not be fetched from URL.", tool_id);
                         if let Some(url) = &tool_identifier.url {
@@ -557,8 +531,9 @@ async fn execute_run(
 
     // Check for updates for this specific tool if not pinned
     if !tool_identifier.is_pinned() {
-        let update_key = find_tool_entry(config, &tool_id).map(|(key, _)| key.clone());
-        check_for_updates(config, update_key.as_deref()).await?;
+        if let Some(key) = find_tool_entry(config, &tool_id).map(|(k, _)| k.clone()) {
+            check_for_updates(config, Some(&key)).await?;
+        }
     }
 
     let mut tool_info = find_tool_executable(config, &tool_id);
@@ -614,22 +589,8 @@ async fn execute_run(
                 tool_info = find_tool_executable(config, &tool_id);
             }
             Err(e) => {
-                tracing::error!("Failed to install tool '{}': {}", tool_id, e);
                 if let Some(gh_error) = e.downcast_ref::<install::github::GitHubReleaseError>() {
-                    match gh_error {
-                        install::github::GitHubReleaseError::TagNotFound { repo, version } => {
-                            eprintln!("\nError: Release tag '{}' not found in {}.", version, repo);
-                            eprintln!("Check available tags at: https://github.com/{}/tags", repo);
-                        }
-                        install::github::GitHubReleaseError::LatestNotFound { repo } => {
-                            eprintln!("\nError: No releases found for {}.", repo);
-                            eprintln!("Check available tags at: https://github.com/{}/tags", repo);
-                        }
-                        install::github::GitHubReleaseError::RequestFailed { repo, .. } => {
-                            eprintln!("\nError: {}", gh_error);
-                            eprintln!("Check available tags at: https://github.com/{}/tags", repo);
-                        }
-                    }
+                    display_github_error(&tool_id, gh_error);
                 } else if tool_identifier.forge == types::Forge::Url {
                     eprintln!("\nError: Tool '{}' could not be fetched from URL.", tool_id);
                     if let Some(url) = &tool_identifier.url {
@@ -882,6 +843,58 @@ fn handle_self_update(new_executable: &Path, tool_id: &str) -> Result<bool> {
     eprintln!("Self-update complete. Restart tooler to use the new version.");
 
     Ok(true)
+}
+
+/// Display a user-friendly error message for GitHub release errors.
+/// Returns the appropriate exit code.
+fn display_github_error(tool_id: &str, gh_error: &install::github::GitHubReleaseError) {
+    use install::github::GitHubReleaseError;
+    match gh_error {
+        GitHubReleaseError::TagNotFound { repo, version } => {
+            tracing::warn!("Release tag '{}' not found in {}", version, repo);
+            eprintln!("\nError: Release tag '{}' not found in {}.", version, repo);
+            eprintln!("Check available tags at: https://github.com/{}/tags", repo);
+        }
+        GitHubReleaseError::LatestNotFound { repo } => {
+            tracing::warn!("No releases found for {}", repo);
+            eprintln!("\nError: No releases found for {}.", repo);
+            if repo.contains('/') {
+                eprintln!("Check available tags at: https://github.com/{}/tags", repo);
+            } else {
+                eprintln!(
+                    "Specify the full repository: tooler install <owner>/{}",
+                    repo
+                );
+            }
+        }
+        GitHubReleaseError::RepoNotFound { repo } => {
+            tracing::warn!("Repository '{}' not found on GitHub", repo);
+            if repo.contains('/') {
+                eprintln!(
+                    "\nError: Repository '{}' not found on GitHub (or is private).",
+                    repo
+                );
+            } else {
+                eprintln!(
+                    "\nError: Tool '{}' not found. Specify the full repository: tooler install <owner>/{}",
+                    tool_id, repo
+                );
+            }
+        }
+        GitHubReleaseError::RateLimited { repo } => {
+            tracing::warn!("GitHub API rate limit reached while querying {}", repo);
+            eprintln!(
+                "\nError: GitHub API rate limit reached. Try again later or set GITHUB_TOKEN."
+            );
+        }
+        GitHubReleaseError::RequestFailed { repo, status } => {
+            tracing::error!("Failed to get release info for {}: {}", repo, status);
+            eprintln!("\nError: {}", gh_error);
+            if repo.contains('/') {
+                eprintln!("Check available tags at: https://github.com/{}/tags", repo);
+            }
+        }
+    }
 }
 
 fn create_tool_symlink(bin_dir: &str, tool_name: &str) -> Result<()> {

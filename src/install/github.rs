@@ -12,6 +12,8 @@ use std::fmt;
 pub enum GitHubReleaseError {
     TagNotFound { repo: String, version: String },
     LatestNotFound { repo: String },
+    RepoNotFound { repo: String },
+    RateLimited { repo: String },
     RequestFailed { repo: String, status: StatusCode },
 }
 
@@ -23,6 +25,12 @@ impl fmt::Display for GitHubReleaseError {
             }
             GitHubReleaseError::LatestNotFound { repo } => {
                 write!(f, "No releases found for {}", repo)
+            }
+            GitHubReleaseError::RepoNotFound { repo } => {
+                write!(f, "Repository '{}' not found on GitHub", repo)
+            }
+            GitHubReleaseError::RateLimited { repo } => {
+                write!(f, "GitHub API rate limit reached while querying {}", repo)
             }
             GitHubReleaseError::RequestFailed { repo, status } => {
                 write!(f, "Failed to get release info for {}: {}", repo, status)
@@ -66,8 +74,15 @@ pub async fn get_gh_release_info(repo: &str, version: Option<&str>) -> Result<Gi
         .await?;
 
     if !response.status().is_success() {
-        if response.status() == StatusCode::NOT_FOUND {
+        let status = response.status();
+        if status == StatusCode::NOT_FOUND {
             if let Some(v) = version {
+                if v == "latest" || v == "default" {
+                    return Err(GitHubReleaseError::LatestNotFound {
+                        repo: repo.to_string(),
+                    }
+                    .into());
+                }
                 return Err(GitHubReleaseError::TagNotFound {
                     repo: repo.to_string(),
                     version: v.to_string(),
@@ -79,9 +94,29 @@ pub async fn get_gh_release_info(repo: &str, version: Option<&str>) -> Result<Gi
             }
             .into());
         }
+        // GitHub returns 403 for non-existent repos (to prevent enumeration)
+        // and also for rate limiting. Check the X-RateLimit-Remaining header.
+        if status == StatusCode::FORBIDDEN {
+            let rate_remaining = response
+                .headers()
+                .get("x-ratelimit-remaining")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<u32>().ok());
+            if rate_remaining == Some(0) {
+                return Err(GitHubReleaseError::RateLimited {
+                    repo: repo.to_string(),
+                }
+                .into());
+            }
+            // 403 with remaining rate limit means the repo doesn't exist or is private
+            return Err(GitHubReleaseError::RepoNotFound {
+                repo: repo.to_string(),
+            }
+            .into());
+        }
         return Err(GitHubReleaseError::RequestFailed {
             repo: repo.to_string(),
-            status: response.status(),
+            status,
         }
         .into());
     }
