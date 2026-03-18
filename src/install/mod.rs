@@ -120,7 +120,7 @@ pub async fn check_for_updates(config: &mut ToolerConfig, tool_key: Option<&str>
     let stale_tools: Vec<(String, String, String, String)> = config
         .tools
         .iter()
-        .filter(|(_key, info)| tool_key.map_or(true, |name| info.tool_name == name))
+        .filter(|(_key, info)| tool_key.is_none_or(|name| info.tool_name == name))
         .filter_map(|(key, info)| {
             if info.pinned {
                 return None;
