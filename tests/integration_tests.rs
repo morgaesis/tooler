@@ -175,6 +175,6 @@ fn test_update_check_triggers() {
         .into();
 
     // It should check for updates. Even if it fails (no network), it should log the attempt.
-    output.assert_stdout_contains("Checking for tools not updated in >5 days");
+    output.assert_stdout_contains("Checking if k9s needs update (threshold: 5 days)");
     output.assert_stdout_contains("Checking for GitHub update for derailed/k9s");
 }

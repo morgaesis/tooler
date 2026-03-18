@@ -95,15 +95,23 @@ pub fn list_installed_tools(config: &ToolerConfig) {
     println!("------------------------------");
 }
 
-pub async fn check_for_updates(config: &mut ToolerConfig) -> Result<()> {
+pub async fn check_for_updates(config: &mut ToolerConfig, tool_key: Option<&str>) -> Result<()> {
     if config.settings.update_check_days <= 0 {
         return Ok(());
     }
 
-    tracing::info!(
-        "Checking for tools not updated in >{} days...",
-        config.settings.update_check_days
-    );
+    if let Some(name) = tool_key {
+        tracing::info!(
+            "Checking if {} needs update (threshold: {} days)...",
+            name,
+            config.settings.update_check_days
+        );
+    } else {
+        tracing::info!(
+            "Checking for tools not updated in >{} days...",
+            config.settings.update_check_days
+        );
+    }
     let now = Utc::now();
     let mut updates_found = Vec::new();
     let mut keys_to_update = Vec::new();
@@ -112,6 +120,9 @@ pub async fn check_for_updates(config: &mut ToolerConfig) -> Result<()> {
     let stale_tools: Vec<(String, String, String, String)> = config
         .tools
         .iter()
+        .filter(|(_key, info)| {
+            tool_key.map_or(true, |name| info.tool_name == name)
+        })
         .filter_map(|(key, info)| {
             if info.pinned {
                 return None;
@@ -134,7 +145,7 @@ pub async fn check_for_updates(config: &mut ToolerConfig) -> Result<()> {
         .collect();
 
     if stale_tools.is_empty() {
-        tracing::info!("No stale unpinned tools found to check for updates.");
+        tracing::info!("No stale tools to check for updates.");
         return Ok(());
     }
 
