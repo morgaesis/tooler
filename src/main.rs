@@ -557,8 +557,8 @@ async fn execute_run(
 
     // Check for updates for this specific tool if not pinned
     if !tool_identifier.is_pinned() {
-        let tool_name = tool_identifier.tool_name();
-        check_for_updates(config, Some(&tool_name)).await?;
+        let update_key = find_tool_entry(config, &tool_id).map(|(key, _)| key.clone());
+        check_for_updates(config, update_key.as_deref()).await?;
     }
 
     let mut tool_info = find_tool_executable(config, &tool_id);
