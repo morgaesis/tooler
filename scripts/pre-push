@@ -1,0 +1,81 @@
+#!/bin/bash
+
+set -e
+
+echo "Running pre-push checks..."
+
+# Validate commit messages and tags
+while read local_ref local_sha remote_ref remote_sha
+do
+    if [ "$local_sha" = "0000000000000000000000000000000000000000" ]; then
+        continue
+    fi
+
+    # 1. Check tags for semver (skip commit message validation for tags)
+    if [[ "$local_ref" == refs/tags/* ]]; then
+        tag="${local_ref#refs/tags/}"
+        if ! echo "$tag" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'; then
+            echo "Error: Non-semver tag found: '$tag'"
+            echo "Tags must follow Semantic Versioning (vX.Y.Z)"
+            exit 1
+        fi
+        continue
+    fi
+
+    # 2. Check commit messages for conventional commits
+    if [ "$remote_sha" = "0000000000000000000000000000000000000000" ]; then
+        # New branch - only check commits not on the default remote branch
+        range="origin/main..$local_sha"
+    else
+        range="$remote_sha..$local_sha"
+    fi
+
+    for commit in $(git rev-list $range 2>/dev/null)
+    do
+        msg=$(git log -1 --format=%s "$commit")
+        if ! echo "$msg" | grep -qE '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\(.*\))?!?: .+$'; then
+            echo "Error: Non-semantic commit message found in $commit"
+            echo "Message: '$msg'"
+            echo "Commit messages must follow Conventional Commits (e.g., feat: ..., fix: ...)"
+            exit 1
+        fi
+    done
+done
+
+# 3. Check Cargo.toml version for semver
+toml_version=$(grep "^version =" Cargo.toml | head -1 | cut -d'"' -f2)
+if ! echo "$toml_version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'; then
+    echo "Error: Non-semver version in Cargo.toml: '$toml_version'"
+    echo "Version must follow Semantic Versioning (X.Y.Z)"
+    exit 1
+fi
+
+echo "Checking formatting..."
+cargo fmt --all -- --check
+
+echo "Running lints (clippy)..."
+cargo clippy -q -- -D warnings
+
+echo "Running tests..."
+cargo test -q
+
+echo "Running markdownlint..."
+if command -v markdownlint-cli2 &>/dev/null; then
+    markdownlint-cli2 README.md
+elif command -v markdownlint &>/dev/null; then
+    markdownlint README.md
+elif npx --yes markdownlint-cli2 --help &>/dev/null 2>&1; then
+    npx --yes markdownlint-cli2 README.md
+else
+    echo "Warning: markdownlint not found, skipping"
+fi
+
+echo "Running yamllint..."
+if command -v yamllint &>/dev/null; then
+    yamllint .
+else
+    echo "Warning: yamllint not found, skipping"
+fi
+
+echo "All checks passed!"
+exit 0
