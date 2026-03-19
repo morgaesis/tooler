@@ -23,11 +23,13 @@ A CLI tool manager for GitHub Releases written in Rust.
 ## Installation
 
 Bootstrap (if tooler is already installed)
+
 ```bash
 tooler pull morgaesis/tooler
 ```
 
 or install from scratch
+
 ```bash
 curl -sSL https://raw.githubusercontent.com/morgaesis/tooler/main/install.sh | bash
 ```
