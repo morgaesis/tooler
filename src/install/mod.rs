@@ -201,13 +201,8 @@ pub async fn check_for_updates(config: &mut ToolerConfig, tool_key: Option<&str>
         }
     }
 
-    if !tools_to_auto_update.is_empty() {
-        eprintln!(
-            "Auto-updating {} stale tools...",
-            tools_to_auto_update.len()
-        );
-    }
-    for (_name, repo, _version) in tools_to_auto_update {
+    for (name, repo, _version) in tools_to_auto_update {
+        eprintln!("[tooler] Auto-updating {}...", name);
         match install_or_update_tool(config, &repo, true, None, None).await {
             Ok(_) => tracing::info!("{} auto-updated successfully", repo),
             Err(e) => tracing::error!("Failed to auto-update {}: {}", repo, e),

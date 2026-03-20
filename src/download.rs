@@ -43,7 +43,7 @@ pub async fn download_file(url: &str, local_path: &Path) -> Result<()> {
         pb.set_position(downloaded);
     }
 
-    pb.finish_with_message("Download complete");
+    pb.finish_and_clear();
     Ok(())
 }
 
