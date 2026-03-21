@@ -214,15 +214,25 @@ async fn main() -> Result<()> {
             };
 
             let repo_to_pull = if let Some(existing) = find_tool_executable(&config, &tool_id) {
-                tracing::info!("Tool '{}' resolves to repository {}", tool_id, existing.repo);
+                tracing::info!(
+                    "Tool '{}' resolves to repository {}",
+                    tool_id,
+                    existing.repo
+                );
                 existing.repo.clone()
             } else {
                 tracing::info!("Pulling {}...", tool_id);
                 tool_id.clone()
             };
 
-            match install_or_update_tool(&mut config, &repo_to_pull, true, asset.as_deref(), parse_body)
-                .await
+            match install_or_update_tool(
+                &mut config,
+                &repo_to_pull,
+                true,
+                asset.as_deref(),
+                parse_body,
+            )
+            .await
             {
                 Ok(path) => {
                     handle_self_update(&path, &repo_to_pull)?;
