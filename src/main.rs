@@ -205,7 +205,6 @@ async fn main() -> Result<()> {
                 }
             };
 
-            tracing::info!("Pulling {}...", tool_id);
             let parse_body = if parse_release_body {
                 Some(true)
             } else if no_parse_release_body {
@@ -213,12 +212,21 @@ async fn main() -> Result<()> {
             } else {
                 None
             };
-            match install_or_update_tool(&mut config, &tool_id, true, asset.as_deref(), parse_body)
+
+            let repo_to_pull = if let Some(existing) = find_tool_executable(&config, &tool_id) {
+                tracing::info!("Tool '{}' resolves to repository {}", tool_id, existing.repo);
+                existing.repo.clone()
+            } else {
+                tracing::info!("Pulling {}...", tool_id);
+                tool_id.clone()
+            };
+
+            match install_or_update_tool(&mut config, &repo_to_pull, true, asset.as_deref(), parse_body)
                 .await
             {
                 Ok(path) => {
-                    handle_self_update(&path, &tool_id)?;
-                    tracing::info!("Successfully pulled {} to {}", tool_id, path.display());
+                    handle_self_update(&path, &repo_to_pull)?;
+                    tracing::info!("Successfully pulled {} to {}", repo_to_pull, path.display());
                     if config.settings.auto_shim && !cfg!(windows) {
                         let bin_dir = &config.settings.bin_dir;
                         create_shim_script(bin_dir)?;

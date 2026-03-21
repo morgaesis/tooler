@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -eo pipefail
 
 # Installation script for tooler (Rust version)
 # This script downloads and installs tooler
@@ -47,7 +47,12 @@ else
 
   if [[ -z "$TAG" ]]; then
     RELEASE_INFO=$(curl -fsSL "https://api.github.com/repos/morgaesis/tooler/releases/latest" 2>/dev/null || true)
-    TAG=$(echo "$RELEASE_INFO" | grep -o '"tag_name": "[^"]*' | cut -d'"' -f4)
+    if command -v jq &>/dev/null; then
+      TAG=$(echo "$RELEASE_INFO" | jq -r '.tag_name // empty' 2>/dev/null || true)
+    fi
+    if [[ -z "$TAG" ]]; then
+      TAG=$(echo "$RELEASE_INFO" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+    fi
   fi
 
   if [[ -z "$TAG" ]]; then
