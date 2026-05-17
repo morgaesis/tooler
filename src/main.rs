@@ -452,47 +452,53 @@ async fn main() -> Result<()> {
                 return Err(anyhow!("Alias '{}' not found", name));
             }
         }
-        Commands::Info { tool_id } => {
-            let mut info = find_tool_executable(&config, &tool_id);
+        Commands::Info { tool_ids } => {
+            let mut any_missing = false;
+            for tool_id in &tool_ids {
+                let mut info = find_tool_executable(&config, tool_id);
 
-            // Recovery: If tool not found in config, try to discover it locally
-            if info.is_none() {
-                if let Ok(Some(recovered)) = install::try_recover_tool(&tool_id) {
-                    eprintln!(
-                        "Recovered tool {} (v{}) from local installation.",
-                        tool_id, recovered.version
+                // Recovery: If tool not found in config, try to discover it locally
+                if info.is_none() {
+                    if let Ok(Some(recovered)) = install::try_recover_tool(tool_id) {
+                        eprintln!(
+                            "Recovered tool {} (v{}) from local installation.",
+                            tool_id, recovered.version
+                        );
+                        let key = ToolIdentifier::parse(&recovered.repo)
+                            .map_err(|e| anyhow!(e))?
+                            .config_key();
+
+                        let mut updated_config = config.clone();
+                        updated_config.tools.insert(key, recovered);
+                        info = find_tool_executable(&updated_config, tool_id);
+                    }
+                }
+
+                if let Some(info) = info {
+                    let system_info = platform::get_system_info();
+                    let all_binaries =
+                        find_all_executables_in_tool_dir(&info.executable_path, &system_info.os);
+
+                    println!("--- Tool Information ({}) ---", tool_id);
+                    println!("  Name:          {}", info.tool_name);
+                    println!("  Repository:    {}", info.repo);
+                    println!("  Version:       {}", info.version);
+                    println!("  Installed at:  {}", info.installed_at);
+                    println!("  Last accessed: {}", info.last_accessed);
+                    println!("  Install type:  {}", info.install_type);
+                    println!("  Pinned:        {}", info.pinned);
+                    println!("  Binaries:      {}", all_binaries.join(", "));
+                    println!("  Path:          {}", info.executable_path);
+                    println!("------------------------");
+                } else {
+                    tracing::error!(
+                        "Tool '{}' not found. Try `tooler list` to see installed tools.",
+                        tool_id
                     );
-                    let key = ToolIdentifier::parse(&recovered.repo)
-                        .map_err(|e| anyhow!(e))?
-                        .config_key();
-
-                    let mut updated_config = config.clone();
-                    updated_config.tools.insert(key, recovered);
-                    info = find_tool_executable(&updated_config, &tool_id);
+                    any_missing = true;
                 }
             }
-
-            if let Some(info) = info {
-                let system_info = platform::get_system_info();
-                let all_binaries =
-                    find_all_executables_in_tool_dir(&info.executable_path, &system_info.os);
-
-                println!("--- Tool Information ---");
-                println!("  Name:          {}", info.tool_name);
-                println!("  Repository:    {}", info.repo);
-                println!("  Version:       {}", info.version);
-                println!("  Installed at:  {}", info.installed_at);
-                println!("  Last accessed: {}", info.last_accessed);
-                println!("  Install type:  {}", info.install_type);
-                println!("  Pinned:        {}", info.pinned);
-                println!("  Binaries:      {}", all_binaries.join(", "));
-                println!("  Path:          {}", info.executable_path);
-                println!("------------------------");
-            } else {
-                tracing::error!(
-                    "Tool '{}' not found. Try `tooler list` to see installed tools.",
-                    tool_id
-                );
+            if any_missing {
                 std::process::exit(1);
             }
         }

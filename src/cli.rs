@@ -98,10 +98,11 @@ pub enum Commands {
         tool_id: String,
     },
 
-    /// Show detailed information about a tool
+    /// Show detailed information about one or more tools
     Info {
-        /// Tool to show info for (e.g., 'owner/repo' or 'tool-name')
-        tool_id: String,
+        /// Tools to show info for (e.g., 'owner/repo' or 'tool-name'). Accepts multiple.
+        #[arg(required = true)]
+        tool_ids: Vec<String>,
     },
 
     /// Manage tool aliases
