@@ -238,24 +238,16 @@ async fn main() -> Result<()> {
                     handle_self_update(&path, &repo_to_pull)?;
                     tracing::info!("Successfully pulled {} to {}", repo_to_pull, path.display());
                     if config.settings.auto_shim && !cfg!(windows) {
-                        let bin_dir = &config.settings.bin_dir;
-                        create_shim_script(bin_dir)?;
-                        create_tool_symlink(bin_dir, &tool_identifier.tool_name())?;
-
-                        // Also create symlinks for all other binaries in the tool directory
-                        let system_info = platform::get_system_info();
-                        let all_binaries = find_all_executables_in_tool_dir(
-                            &path.to_string_lossy(),
-                            &system_info.os,
-                        );
-                        for binary in &all_binaries {
-                            create_tool_symlink(bin_dir, binary)?;
-                            // Also create a symlink for the base name
-                            // e.g. "cmk.linux.x86-64" -> "cmk", "wt" stays "wt"
-                            let base = strip_platform_suffix(binary);
-                            if base != *binary {
-                                create_tool_symlink(bin_dir, &base)?;
-                            }
+                        if let Err(e) = setup_auto_shim(
+                            &config.settings.bin_dir,
+                            &tool_identifier.tool_name(),
+                            &path,
+                        ) {
+                            tracing::warn!(
+                                "auto-shim skipped (bin_dir={}): {}. Pull itself succeeded — set bin-dir to a writable path or disable auto-shim.",
+                                config.settings.bin_dir,
+                                e
+                            );
                         }
                     }
                 }
@@ -556,6 +548,10 @@ async fn execute_run(
 
     let mut tool_info = find_tool_executable(config, &tool_id);
 
+    // Remember the resolved repo before any invalidation, so recovery & install
+    // can use the real repo (e.g. "cli/cli") instead of the user's shortname ("gh").
+    let resolved_repo: Option<String> = tool_info.as_ref().map(|i| i.repo.clone());
+
     // Validate tool_info if found
     if let Some(ref info) = tool_info {
         let path = Path::new(&info.executable_path);
@@ -568,9 +564,11 @@ async fn execute_run(
         }
     }
 
+    let recovery_target: &str = resolved_repo.as_deref().unwrap_or(&tool_id);
+
     // Recovery: If tool not found in config, try to discover it locally
     if tool_info.is_none() && asset.is_none() {
-        if let Ok(Some(recovered)) = install::try_recover_tool(&tool_id) {
+        if let Ok(Some(recovered)) = install::try_recover_tool(recovery_target) {
             eprintln!(
                 "Recovered tool {} (v{}) from local installation.",
                 tool_id, recovered.version
@@ -595,7 +593,7 @@ async fn execute_run(
         }
         match install_or_update_tool(
             config,
-            &tool_id,
+            recovery_target,
             false,
             asset.as_deref(),
             parse_release_body,
@@ -660,16 +658,17 @@ async fn execute_run(
 
         // Create shim if auto_shim is enabled
         if config.settings.auto_shim && !cfg!(windows) {
-            let bin_dir = &config.settings.bin_dir;
-            create_shim_script(bin_dir)?;
-            create_tool_symlink(bin_dir, &tool_identifier.tool_name())?;
-
-            // Also create symlinks for all other binaries in the tool directory
-            let system_info = platform::get_system_info();
-            let all_binaries =
-                find_all_executables_in_tool_dir(&info.executable_path, &system_info.os);
-            for binary in &all_binaries {
-                create_tool_symlink(bin_dir, binary)?;
+            if let Err(e) = setup_auto_shim(
+                &config.settings.bin_dir,
+                &tool_identifier.tool_name(),
+                Path::new(&info.executable_path),
+            ) {
+                tracing::warn!(
+                    "auto-shim skipped (bin_dir={}): {}. Tool still runs from {}.",
+                    config.settings.bin_dir,
+                    e,
+                    info.executable_path
+                );
             }
         }
 
@@ -743,6 +742,25 @@ fn setup_logging(cli: &Cli) -> Result<()> {
         .with_thread_names(false)
         .init();
 
+    Ok(())
+}
+
+/// Set up shim + symlinks for a tool. Best-effort: returns an error on the first
+/// I/O failure so the caller can warn instead of aborting the parent command.
+fn setup_auto_shim(bin_dir: &str, primary_name: &str, executable_path: &Path) -> Result<()> {
+    create_shim_script(bin_dir)?;
+    create_tool_symlink(bin_dir, primary_name)?;
+
+    let system_info = platform::get_system_info();
+    let all_binaries =
+        find_all_executables_in_tool_dir(&executable_path.to_string_lossy(), &system_info.os);
+    for binary in &all_binaries {
+        create_tool_symlink(bin_dir, binary)?;
+        let base = strip_platform_suffix(binary);
+        if base != *binary {
+            create_tool_symlink(bin_dir, &base)?;
+        }
+    }
     Ok(())
 }
 

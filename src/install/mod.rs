@@ -497,6 +497,12 @@ pub fn recover_all_installed_tools(config: &mut ToolerConfig) -> Result<usize> {
             }
 
             let dir_name = path.file_name().unwrap_or_default().to_string_lossy();
+
+            // Skip forge container dirs when iterating tools_dir itself.
+            if forge_dir == tools_dir && matches!(dir_name.as_ref(), "github" | "url") {
+                continue;
+            }
+
             let parts: Vec<&str> = dir_name.split("__").collect();
 
             let (author, repo) = match parts.len() {
@@ -754,8 +760,12 @@ pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
         scan_dirs.push(tools_dir.join(forge));
     }
 
-    // Pre-compile regex for version detection
     let re_version = regex::Regex::new(r"v?\d+\.\d+").unwrap();
+    let query_name_lower = tool_id.tool_name().to_lowercase();
+
+    // Two-pass scan: prefer directory-name matches over binary-name matches,
+    // so e.g. recovering "cli" picks cli/cli's dir rather than first dir with a "cli" binary.
+    let mut binary_match_fallback: Option<ToolInfo> = None;
 
     for forge_dir in scan_dirs {
         if !forge_dir.exists() {
@@ -772,6 +782,13 @@ pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
             }
 
             let dir_name = path.file_name().unwrap_or_default().to_string_lossy();
+
+            // Skip forge container dirs when iterating tools_dir itself; they are
+            // scanned separately as their own forge_dir entries.
+            if forge_dir == tools_dir && matches!(dir_name.as_ref(), "github" | "url") {
+                continue;
+            }
+
             let parts: Vec<&str> = dir_name.split("__").collect();
 
             let (author, repo, arch) = match parts.len() {
@@ -781,7 +798,6 @@ pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
                 _ => continue,
             };
 
-            // Stricter directory name matching
             let expected_dir_name = format!(
                 "{}__{}__{}",
                 tool_id.author,
@@ -790,131 +806,170 @@ pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
             );
             let legacy_dir_name = format!("{}__{}", tool_id.author, tool_id.tool_name());
 
-            let name_matches = if tool_id.author == "unknown" {
+            let dir_matches = if tool_id.author == "unknown" {
                 repo == tool_id.tool_name()
             } else {
                 dir_name == expected_dir_name || dir_name == legacy_dir_name
             };
 
-            if name_matches {
-                // If arch is present in directory name, it MUST match
-                if let Some(a) = arch {
-                    if a != system_info.arch {
+            // If arch is present, enforce arch match for either pass.
+            if let Some(a) = arch {
+                if a != system_info.arch {
+                    if dir_matches {
                         tracing::debug!(
                             "Directory {} architecture mismatch: {} != {}",
                             dir_name,
                             a,
                             system_info.arch
                         );
-                        continue;
                     }
+                    continue;
                 }
+            }
 
-                // Recursively find directories that look like versions
-                let mut version_candidates: Vec<(String, String, PathBuf)> = Vec::new();
+            // If dir name doesn't match, fall back to scanning binaries inside
+            // (e.g. query "gh" should match cli/cli's dir because it contains a `gh` binary).
+            let binary_matches = !dir_matches
+                && tool_id.author == "unknown"
+                && dir_contains_binary_named(&path, &query_name_lower, &system_info.os);
 
-                for entry in WalkDir::new(&path).into_iter().filter_map(|e| e.ok()) {
-                    if entry.path().is_dir() {
-                        let name = entry.file_name().to_string_lossy();
-                        if re_version.is_match(&name) {
-                            let label = entry
-                                .path()
-                                .strip_prefix(&path)
-                                .map(|rel| rel.to_string_lossy().to_string())
-                                .unwrap_or_else(|_| name.to_string());
-                            version_candidates.push((
-                                label,
-                                name.to_string(),
-                                entry.path().to_path_buf(),
-                            ));
-                        }
-                    }
-                }
+            if !dir_matches && !binary_matches {
+                continue;
+            }
 
-                // If no version-like dir found, try top-level subdirs
-                if version_candidates.is_empty() {
-                    if let Ok(subs) = fs::read_dir(&path) {
-                        for sub in subs.flatten() {
-                            if sub.path().is_dir() {
-                                let label = sub.file_name().to_string_lossy().to_string();
-                                version_candidates.push((label.clone(), label, sub.path()));
-                            }
-                        }
-                    }
-                }
+            let Some(recovered) = build_recovered_tool_info(
+                &path,
+                &forge_dir,
+                author,
+                repo,
+                &system_info,
+                &re_version,
+            ) else {
+                continue;
+            };
 
-                // Sort and pick latest version
-                version_candidates.sort_by(|a, b| {
-                    let v_a = semver::Version::parse(a.1.trim_start_matches('v'))
-                        .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
-                    let v_b = semver::Version::parse(b.1.trim_start_matches('v'))
-                        .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
-                    v_a.cmp(&v_b)
-                });
-
-                if let Some((_version_label, semver_name, ver_path)) = version_candidates.last() {
-                    if let Some(exec_path) = find_executable_in_extracted(
-                        ver_path,
-                        repo,
-                        &format!("{}/{}", author, repo),
-                        &system_info.os,
-                        &PathBuf::new(),
-                    ) {
-                        // Double check architecture of the recovered binary
-                        if let Ok(false) = crate::platform::check_binary_architecture(&exec_path) {
-                            tracing::debug!(
-                                "Recovered binary {} has mismatched architecture, skipping",
-                                exec_path.display()
-                            );
-                            continue;
-                        }
-
-                        let clean_version = semver_name.trim_start_matches('v').to_string();
-
-                        let forge_val = if forge_dir.ends_with("url") {
-                            Forge::Url
-                        } else {
-                            Forge::GitHub
-                        };
-
-                        // Deduce install type
-                        let install_type = if ver_path.join(".venv").exists() {
-                            "python-venv".to_string()
-                        } else {
-                            // Standalone binary or archive?
-                            let file_count = fs::read_dir(ver_path).map(|r| r.count()).unwrap_or(0);
-                            if file_count <= 3 {
-                                // Usually binary, license, readme
-                                "binary".to_string()
-                            } else {
-                                "archive".to_string()
-                            }
-                        };
-
-                        return Ok(Some(ToolInfo {
-                            tool_name: repo.to_lowercase(),
-                            repo: if author == "direct" || author == "unknown" {
-                                repo.to_string()
-                            } else {
-                                format!("{}/{}", author, repo)
-                            },
-                            version: clean_version,
-                            executable_path: exec_path.to_string_lossy().to_string(),
-                            install_type,
-                            pinned: false,
-                            installed_at: Utc::now().to_rfc3339(),
-                            last_accessed: Utc::now().to_rfc3339(),
-                            last_checked: Some(Utc::now().to_rfc3339()),
-                            forge: forge_val,
-                            original_url: None,
-                        }));
-                    }
-                }
+            if dir_matches {
+                return Ok(Some(recovered));
+            }
+            // Binary-name match: remember as fallback but keep looking for a dir match
+            if binary_match_fallback.is_none() {
+                binary_match_fallback = Some(recovered);
             }
         }
     }
 
-    Ok(None)
+    Ok(binary_match_fallback)
+}
+
+/// Returns true if `dir` (recursively) contains an executable whose name
+/// equals or starts with `target_name` (case-insensitive).
+fn dir_contains_binary_named(dir: &std::path::Path, target_name: &str, os: &str) -> bool {
+    for entry in WalkDir::new(dir).into_iter().filter_map(|e| e.ok()) {
+        let p = entry.path();
+        if !p.is_file() || !crate::download::is_executable(p, os) {
+            continue;
+        }
+        let name = p
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        if name == target_name {
+            return true;
+        }
+        let stem = name.split(['.', '-', '_']).next().unwrap_or("");
+        if stem == target_name {
+            return true;
+        }
+    }
+    false
+}
+
+/// Build a ToolInfo by locating the latest version subdirectory and an executable in it.
+fn build_recovered_tool_info(
+    tool_path: &std::path::Path,
+    forge_dir: &std::path::Path,
+    author: &str,
+    repo: &str,
+    system_info: &crate::types::PlatformInfo,
+    re_version: &regex::Regex,
+) -> Option<ToolInfo> {
+    let mut version_candidates: Vec<(String, PathBuf)> = Vec::new();
+    for entry in WalkDir::new(tool_path).into_iter().filter_map(|e| e.ok()) {
+        if entry.path().is_dir() {
+            let name = entry.file_name().to_string_lossy();
+            if re_version.is_match(&name) {
+                version_candidates.push((name.to_string(), entry.path().to_path_buf()));
+            }
+        }
+    }
+    if version_candidates.is_empty() {
+        if let Ok(subs) = fs::read_dir(tool_path) {
+            for sub in subs.flatten() {
+                if sub.path().is_dir() {
+                    let label = sub.file_name().to_string_lossy().to_string();
+                    version_candidates.push((label, sub.path()));
+                }
+            }
+        }
+    }
+    version_candidates.sort_by(|a, b| {
+        let v_a = semver::Version::parse(a.0.trim_start_matches('v'))
+            .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
+        let v_b = semver::Version::parse(b.0.trim_start_matches('v'))
+            .unwrap_or_else(|_| semver::Version::new(0, 0, 0));
+        v_a.cmp(&v_b)
+    });
+
+    let (semver_name, ver_path) = version_candidates.into_iter().next_back()?;
+    let exec_path = find_executable_in_extracted(
+        &ver_path,
+        repo,
+        &format!("{}/{}", author, repo),
+        &system_info.os,
+        &PathBuf::new(),
+    )?;
+    if let Ok(false) = crate::platform::check_binary_architecture(&exec_path) {
+        tracing::debug!(
+            "Recovered binary {} has mismatched architecture, skipping",
+            exec_path.display()
+        );
+        return None;
+    }
+
+    let clean_version = semver_name.trim_start_matches('v').to_string();
+    let forge_val = if forge_dir.ends_with("url") {
+        Forge::Url
+    } else {
+        Forge::GitHub
+    };
+    let install_type = if ver_path.join(".venv").exists() {
+        "python-venv".to_string()
+    } else {
+        let file_count = fs::read_dir(&ver_path).map(|r| r.count()).unwrap_or(0);
+        if file_count <= 3 {
+            "binary".to_string()
+        } else {
+            "archive".to_string()
+        }
+    };
+
+    Some(ToolInfo {
+        tool_name: repo.to_lowercase(),
+        repo: if author == "direct" || author == "unknown" {
+            repo.to_string()
+        } else {
+            format!("{}/{}", author, repo)
+        },
+        version: clean_version,
+        executable_path: exec_path.to_string_lossy().to_string(),
+        install_type,
+        pinned: false,
+        installed_at: Utc::now().to_rfc3339(),
+        last_accessed: Utc::now().to_rfc3339(),
+        last_checked: Some(Utc::now().to_rfc3339()),
+        forge: forge_val,
+        original_url: None,
+    })
 }
 
 pub(crate) fn version_matches(requested: &str, existing: &str) -> bool {

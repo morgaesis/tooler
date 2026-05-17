@@ -60,6 +60,63 @@ fn test_e2e_self_healing() {
 }
 
 #[test]
+fn test_recovery_by_binary_name_when_dir_differs() {
+    // Recovers cli/cli (dir is `cli__cli__amd64`) when the user queries by the
+    // binary name `gh` — the dir name doesn't match, but the binary inside does.
+    let root = tempdir().expect("failed to create temp dir");
+    let config_dir = root.path().join("config");
+    let data_dir = root.path().join("data");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::create_dir_all(&data_dir).unwrap();
+
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "amd64"
+    };
+    let bin_dir = data_dir.join(format!(
+        "tools/github/cli__cli__{}/v2.92.0/gh_2.92.0_linux_amd64/bin",
+        arch
+    ));
+    fs::create_dir_all(&bin_dir).unwrap();
+    let binary_path = bin_dir.join("gh");
+    fs::write(&binary_path, "#!/bin/bash\necho \"gh version 2.92.0\"").unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&binary_path).unwrap().permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&binary_path, perms).unwrap();
+    }
+
+    let output = Command::new("cargo")
+        .args(["run", "--quiet", "--", "gh", "--version"])
+        .env("TOOLER_CONFIG", config_dir.join("config.json"))
+        .env("TOOLER_DATA_DIR", &data_dir)
+        .output()
+        .expect("failed to execute tooler");
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stderr.contains("Recovered tool gh (v2.92.0)"),
+        "expected recovery of gh -> cli/cli v2.92.0, got stderr={}",
+        stderr
+    );
+    assert!(stdout.contains("gh version 2.92.0"));
+
+    // Verify config was healed with the resolved repo, not the user's shortname
+    let healed = fs::read_to_string(config_dir.join("config.json")).unwrap();
+    assert!(
+        healed.contains("cli/cli"),
+        "config should be healed with cli/cli, got: {}",
+        healed
+    );
+}
+
+#[test]
 fn test_no_aggressive_fuzzy_matching() {
     let root = tempdir().expect("failed to create temp dir");
     let config_dir = root.path().join("config");
