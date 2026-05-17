@@ -101,20 +101,30 @@ async fn main() -> Result<()> {
                         .collect();
                     for key in keys_to_update {
                         if let Some(info) = config.tools.get(&key).cloned() {
+                            let old_version = info.version.clone();
                             match install_or_update_tool(&mut config, &info.repo, true, None, None)
                                 .await
                             {
-                                Ok(_) => updated_count += 1,
+                                Ok(_) => {
+                                    let new_version = config
+                                        .tools
+                                        .get(&key)
+                                        .map(|t| t.version.clone())
+                                        .unwrap_or_else(|| "unknown".to_string());
+                                    report_update(&info.repo, Some(&old_version), &new_version);
+                                    updated_count += 1;
+                                }
                                 Err(e) => tracing::warn!("Failed to update {}: {}", info.repo, e),
                             }
                         }
                     }
-                    tracing::info!(
-                        "Update process finished. {} tool(s) were checked/updated",
+                    eprintln!(
+                        "Update process finished. {} tool(s) were checked/updated.",
                         updated_count
                     );
                 } else {
                     let existing_tool = find_tool_executable(&config, &tool_id);
+                    let old_version = existing_tool.as_ref().map(|t| t.version.clone());
                     let (repo, tool_identifier) = if let Some(tool_info) = existing_tool {
                         (tool_info.repo.clone(), ToolIdentifier::parse(&tool_id).ok())
                     } else {
@@ -137,7 +147,10 @@ async fn main() -> Result<()> {
                     match install_or_update_tool(&mut config, &repo, true, None, None).await {
                         Ok(path) => {
                             handle_self_update(&path, &repo)?;
-                            tracing::info!("{} updated successfully", tool_id);
+                            let new_version = find_tool_executable(&config, &tool_id)
+                                .map(|t| t.version)
+                                .unwrap_or_else(|| "unknown".to_string());
+                            report_update(&tool_id, old_version.as_deref(), &new_version);
                         }
                         Err(e) => {
                             tracing::error!("Failed to update tool '{}': {}", tool_id, e);
@@ -213,7 +226,9 @@ async fn main() -> Result<()> {
                 None
             };
 
-            let repo_to_pull = if let Some(existing) = find_tool_executable(&config, &tool_id) {
+            let existing = find_tool_executable(&config, &tool_id);
+            let old_version = existing.as_ref().map(|t| t.version.clone());
+            let repo_to_pull = if let Some(existing) = existing {
                 tracing::info!(
                     "Tool '{}' resolves to repository {}",
                     tool_id,
@@ -236,7 +251,11 @@ async fn main() -> Result<()> {
             {
                 Ok(path) => {
                     handle_self_update(&path, &repo_to_pull)?;
-                    tracing::info!("Successfully pulled {} to {}", repo_to_pull, path.display());
+                    let new_version = find_tool_executable(&config, &tool_id)
+                        .map(|t| t.version)
+                        .unwrap_or_else(|| "unknown".to_string());
+                    report_update(&repo_to_pull, old_version.as_deref(), &new_version);
+                    tracing::info!("Path: {}", path.display());
                     if config.settings.auto_shim && !cfg!(windows) {
                         if let Err(e) = setup_auto_shim(
                             &config.settings.bin_dir,
@@ -454,12 +473,26 @@ async fn main() -> Result<()> {
         }
         Commands::Info { tool_ids } => {
             let mut any_missing = false;
+            let os = platform::get_system_info().os;
             for tool_id in &tool_ids {
                 let mut info = find_tool_executable(&config, tool_id);
 
-                // Recovery: If tool not found in config, try to discover it locally
+                // Invalidate stale entries (path missing or non-executable) so recovery runs.
+                let resolved_repo = info.as_ref().map(|i| i.repo.clone());
+                if let Some(ref i) = info {
+                    let p = Path::new(&i.executable_path);
+                    if !p.exists() || !is_executable(p, &os) {
+                        eprintln!(
+                            "Note: cached entry for '{}' points at missing/invalid binary ({}). Attempting recovery...",
+                            tool_id, i.executable_path
+                        );
+                        info = None;
+                    }
+                }
+
+                let recovery_target: &str = resolved_repo.as_deref().unwrap_or(tool_id);
                 if info.is_none() {
-                    if let Ok(Some(recovered)) = install::try_recover_tool(tool_id) {
+                    if let Ok(Some(recovered)) = install::try_recover_tool(recovery_target) {
                         eprintln!(
                             "Recovered tool {} (v{}) from local installation.",
                             tool_id, recovered.version
@@ -467,10 +500,9 @@ async fn main() -> Result<()> {
                         let key = ToolIdentifier::parse(&recovered.repo)
                             .map_err(|e| anyhow!(e))?
                             .config_key();
-
-                        let mut updated_config = config.clone();
-                        updated_config.tools.insert(key, recovered);
-                        info = find_tool_executable(&updated_config, tool_id);
+                        config.tools.insert(key, recovered);
+                        save_tool_configs(&config)?;
+                        info = find_tool_executable(&config, tool_id);
                     }
                 }
 
@@ -751,6 +783,24 @@ fn setup_logging(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
+/// Report the outcome of an install/update to stderr in a default-verbosity
+/// visible form. `old` is `None` for a fresh install.
+fn report_update(tool_id: &str, old: Option<&str>, new: &str) {
+    let normalize = |v: &str| v.trim_start_matches('v').to_string();
+    let new_n = normalize(new);
+    match old {
+        Some(o) if normalize(o) == new_n => {
+            eprintln!("{} already at v{}", tool_id, new_n);
+        }
+        Some(o) => {
+            eprintln!("Updated {}: v{} -> v{}", tool_id, normalize(o), new_n);
+        }
+        None => {
+            eprintln!("Installed {} v{}", tool_id, new_n);
+        }
+    }
+}
+
 /// Set up shim + symlinks for a tool. Best-effort: returns an error on the first
 /// I/O failure so the caller can warn instead of aborting the parent command.
 fn setup_auto_shim(bin_dir: &str, primary_name: &str, executable_path: &Path) -> Result<()> {
@@ -881,8 +931,7 @@ fn handle_self_update(new_executable: &Path, tool_id: &str) -> Result<bool> {
     }
 
     fs::rename(&tmp_path, &current_exe)?;
-    tracing::info!("Self-update complete. Restart tooler to use the new version.");
-    eprintln!("Self-update complete. Restart tooler to use the new version.");
+    tracing::debug!("Self-update: replaced binary at {}", current_exe.display());
 
     Ok(true)
 }

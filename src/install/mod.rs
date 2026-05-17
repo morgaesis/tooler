@@ -201,10 +201,24 @@ pub async fn check_for_updates(config: &mut ToolerConfig, tool_key: Option<&str>
         }
     }
 
-    for (name, repo, _version) in tools_to_auto_update {
+    for (name, repo, old_version) in tools_to_auto_update {
         eprintln!("[tooler] Auto-updating {}...", name);
         match install_or_update_tool(config, &repo, true, None, None).await {
-            Ok(_) => tracing::info!("{} auto-updated successfully", repo),
+            Ok(_) => {
+                let new_version = config
+                    .tools
+                    .values()
+                    .find(|t| t.repo == repo)
+                    .map(|t| t.version.clone())
+                    .unwrap_or_else(|| "unknown".to_string());
+                let old = old_version.trim_start_matches('v');
+                let new = new_version.trim_start_matches('v');
+                if old == new {
+                    eprintln!("[tooler] {} already at v{}", repo, new);
+                } else {
+                    eprintln!("[tooler] Updated {}: v{} -> v{}", repo, old, new);
+                }
+            }
             Err(e) => tracing::error!("Failed to auto-update {}: {}", repo, e),
         }
     }
