@@ -40,6 +40,7 @@ pub fn find_asset_for_platform(
     let os_aliases = [
         ("linux", vec!["linux", "unknown-linux", "pc-linux"]),
         ("darwin", vec!["darwin", "macos", "osx"]),
+        ("macos", vec!["darwin", "macos", "osx"]),
         ("windows", vec!["windows", "win", "cygwin"]),
     ];
 
@@ -286,6 +287,7 @@ pub fn find_asset_in_release_body(
     let os_aliases = [
         ("linux", vec!["linux", "unknown-linux", "pc-linux"]),
         ("darwin", vec!["darwin", "macos", "osx"]),
+        ("macos", vec!["darwin", "macos", "osx"]),
         ("windows", vec!["windows", "win", "cygwin"]),
     ];
 
@@ -430,5 +432,34 @@ pub fn check_binary_architecture(_path: &std::path::Path) -> Result<bool> {
     {
         // Windows or other - for now assume true as we mostly target Linux/macOS for this check
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_macos_asset_matching_uses_rust_os_name() {
+        let assets = vec![GitHubAsset {
+            name: "gh_2.92.0_macOS_arm64.zip".to_string(),
+            browser_download_url: "https://example.invalid/gh_2.92.0_macOS_arm64.zip".to_string(),
+        }];
+
+        let asset = find_asset_for_platform(&assets, "cli/cli", "macos", "arm64")
+            .unwrap()
+            .expect("macos arm64 asset should match");
+
+        assert_eq!(asset.name, "gh_2.92.0_macOS_arm64.zip");
+    }
+
+    #[test]
+    fn test_macos_release_body_matching_uses_rust_os_name() {
+        let body = "[macOS arm64](https://example.invalid/gh_2.92.0_macOS_arm64.zip)";
+
+        let asset = find_asset_in_release_body(body, "macos", "arm64")
+            .expect("macos arm64 body URL should match");
+
+        assert_eq!(asset.name, "gh_2.92.0_macOS_arm64.zip");
     }
 }
