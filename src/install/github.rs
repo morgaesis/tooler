@@ -67,11 +67,14 @@ pub async fn get_gh_release_info(repo: &str, version: Option<&str>) -> Result<Gi
     let url = build_gh_release_url(repo, version);
 
     let client = reqwest::Client::new();
-    let response = client
-        .get(&url)
-        .header("User-Agent", "tooler")
-        .send()
-        .await?;
+    let mut request = client.get(&url).header("User-Agent", "tooler");
+    if let Ok(token) = std::env::var("GITHUB_TOKEN") {
+        let token = token.trim();
+        if !token.is_empty() {
+            request = request.bearer_auth(token);
+        }
+    }
+    let response = request.send().await?;
 
     if !response.status().is_success() {
         let status = response.status();
