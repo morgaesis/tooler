@@ -43,9 +43,14 @@ if ($ToolerVersion) {
 
     if (-not $tag) {
         try {
-            $release = Invoke-RestMethod -Uri "https://api.github.com/repos/morgaesis/tooler/releases/latest" -Headers @{
+            $headers = @{
                 "User-Agent" = "tooler-install.ps1"
             }
+            if ($env:GITHUB_TOKEN) {
+                $headers["Authorization"] = "Bearer $env:GITHUB_TOKEN"
+            }
+
+            $release = Invoke-RestMethod -Uri "https://api.github.com/repos/morgaesis/tooler/releases/latest" -Headers $headers
             $tag = $release.tag_name
         } catch {
             throw @"

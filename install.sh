@@ -46,12 +46,17 @@ else
   fi
 
   if [[ -z "$TAG" ]]; then
-    RELEASE_INFO=$(curl -fsSL "https://api.github.com/repos/morgaesis/tooler/releases/latest" 2>/dev/null || true)
+    CURL_HEADERS=(-H "User-Agent: tooler-install.sh")
+    if [[ -n "${GITHUB_TOKEN:-}" ]]; then
+      CURL_HEADERS+=(-H "Authorization: Bearer $GITHUB_TOKEN")
+    fi
+
+    RELEASE_INFO=$(curl -fsSL "${CURL_HEADERS[@]}" "https://api.github.com/repos/morgaesis/tooler/releases/latest" 2>/dev/null || true)
     if command -v jq &>/dev/null; then
       TAG=$(echo "$RELEASE_INFO" | jq -r '.tag_name // empty' 2>/dev/null || true)
     fi
     if [[ -z "$TAG" ]]; then
-      TAG=$(echo "$RELEASE_INFO" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+      TAG=$(echo "$RELEASE_INFO" | grep -o '"tag_name"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/' || true)
     fi
   fi
 
