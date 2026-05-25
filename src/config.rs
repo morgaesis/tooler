@@ -62,41 +62,46 @@ pub fn get_tooler_tools_dir() -> Result<PathBuf> {
 pub fn load_tool_configs() -> Result<ToolerConfig> {
     let config_path = get_tooler_config_file_path()?;
 
-    if !config_path.exists() {
-        return Ok(ToolerConfig::default());
-    }
+    let mut config = if config_path.exists() {
+        let content = fs::read_to_string(&config_path)
+            .with_context(|| format!("Could not read config file at {}", config_path.display()))?;
 
-    let content = fs::read_to_string(&config_path)
-        .with_context(|| format!("Could not read config file at {}", config_path.display()))?;
-
-    let mut config: ToolerConfig = match serde_json::from_str(&content) {
-        Ok(config) => config,
-        Err(e) => {
-            // Check if error is due to missing fields (partial config) vs malformed JSON
-            if e.is_data() {
-                // Missing fields - try to parse as partial config and merge with defaults
-                let mut default_config = ToolerConfig::default();
-                if let Ok(partial_config) = serde_json::from_str::<ToolerConfig>(&content) {
-                    // Merge any valid settings from partial config
-                    if partial_config.settings.update_check_days != 0 {
-                        default_config.settings.update_check_days =
-                            partial_config.settings.update_check_days;
+        match serde_json::from_str(&content) {
+            Ok(config) => config,
+            Err(e) => {
+                // Check if error is due to missing fields (partial config) vs malformed JSON
+                if e.is_data() {
+                    // Missing fields - try to parse as partial config and merge with defaults
+                    let mut default_config = ToolerConfig::default();
+                    if let Ok(partial_config) = serde_json::from_str::<ToolerConfig>(&content) {
+                        // Merge any valid settings from partial config
+                        if partial_config.settings.update_check_days != 0 {
+                            default_config.settings.update_check_days =
+                                partial_config.settings.update_check_days;
+                        }
+                        if !partial_config.settings.bin_dir.is_empty() {
+                            default_config.settings.bin_dir = partial_config.settings.bin_dir;
+                        }
+                        default_config.settings.auto_shim = partial_config.settings.auto_shim;
+                        default_config.settings.auto_update = partial_config.settings.auto_update;
                     }
-                    if !partial_config.settings.bin_dir.is_empty() {
-                        default_config.settings.bin_dir = partial_config.settings.bin_dir;
-                    }
-                    default_config.settings.auto_shim = partial_config.settings.auto_shim;
-                    default_config.settings.auto_update = partial_config.settings.auto_update;
+                    default_config
+                } else {
+                    // Malformed JSON - fail with original error
+                    return Err(e).with_context(|| "Could not parse config file as JSON");
                 }
-                default_config
-            } else {
-                // Malformed JSON - fail with original error
-                return Err(e).with_context(|| "Could not parse config file as JSON");
             }
         }
+    } else {
+        ToolerConfig::default()
     };
 
-    // Apply environment variable overrides
+    apply_environment_overrides(&mut config);
+
+    Ok(config)
+}
+
+fn apply_environment_overrides(config: &mut ToolerConfig) {
     if let Ok(days) = std::env::var("TOOLER_UPDATE_CHECK_DAYS") {
         if let Ok(days) = days.parse::<i32>() {
             config.settings.update_check_days = days;
@@ -114,8 +119,6 @@ pub fn load_tool_configs() -> Result<ToolerConfig> {
     if let Ok(bin_dir) = std::env::var("TOOLER_BIN_DIR") {
         config.settings.bin_dir = bin_dir;
     }
-
-    Ok(config)
 }
 
 pub fn save_tool_configs(config: &ToolerConfig) -> Result<()> {
@@ -185,5 +188,39 @@ mod tests {
         assert!(config.settings.bin_dir.contains("tooler"));
         #[cfg(not(windows))]
         assert!(config.settings.bin_dir.contains(".local"));
+    }
+
+    #[test]
+    fn test_env_overrides_apply_without_existing_config_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config").join("config.json");
+        let bin_dir = temp_dir.path().join("bin");
+
+        let old_config = std::env::var("TOOLER_CONFIG").ok();
+        let old_config_path = std::env::var("TOOLER_CONFIG_PATH").ok();
+        let old_bin_dir = std::env::var("TOOLER_BIN_DIR").ok();
+
+        std::env::set_var("TOOLER_CONFIG", &config_path);
+        std::env::remove_var("TOOLER_CONFIG_PATH");
+        std::env::set_var("TOOLER_BIN_DIR", &bin_dir);
+
+        let config = load_tool_configs().unwrap();
+        assert_eq!(config.settings.bin_dir, bin_dir.to_string_lossy());
+
+        if let Some(value) = old_config {
+            std::env::set_var("TOOLER_CONFIG", value);
+        } else {
+            std::env::remove_var("TOOLER_CONFIG");
+        }
+        if let Some(value) = old_config_path {
+            std::env::set_var("TOOLER_CONFIG_PATH", value);
+        } else {
+            std::env::remove_var("TOOLER_CONFIG_PATH");
+        }
+        if let Some(value) = old_bin_dir {
+            std::env::set_var("TOOLER_BIN_DIR", value);
+        } else {
+            std::env::remove_var("TOOLER_BIN_DIR");
+        }
     }
 }
