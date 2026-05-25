@@ -119,8 +119,13 @@ try {
         Write-Host "Registering tooler for self-updates..."
         try {
             & $targetExe pull morgaesis/tooler 2>$null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Warning "Self-update registration skipped: tooler exited with code $LASTEXITCODE"
+                $global:LASTEXITCODE = 0
+            }
         } catch {
             Write-Warning "Self-update registration skipped: $($_.Exception.Message)"
+            $global:LASTEXITCODE = 0
         }
     } else {
         Write-Host "Skipping self-update registration."
