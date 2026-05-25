@@ -114,14 +114,20 @@ When `auto_shim` is enabled (default: true, Unix only), Tooler creates a shim-ba
 
 ### Shim Script
 
-`tooler-shim` is a bash script that delegates to `tooler run`:
+`tooler-shim` is a bash script that delegates to `tooler run` through the
+absolute Tooler executable path that generated the shim:
 ```bash
 #!/bin/bash
-tool_name=$(basename "$0")
-exec tooler run "$tool_name" "$@"
+tool_name="${0##*/}"
+tooler_bin='/path/to/tooler'
+exec "$tooler_bin" run "$tool_name" "$@"
 ```
 
-Created once by `create_shim_script`. If the file exists but is not a valid bash script, it is recreated.
+`create_shim_script` rewrites stale shim content so old wrappers heal on the
+next `pull` or `run`. If the embedded Tooler binary is missing or not
+executable, the shim logs a failure to `$XDG_STATE_HOME/tooler/shim.log` or
+`~/.local/state/tooler/shim.log`, then falls back to an executable `tooler` from
+`PATH` when one is available.
 
 ### Symlink Creation
 

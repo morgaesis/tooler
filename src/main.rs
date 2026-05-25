@@ -838,10 +838,50 @@ fn create_shim_script(bin_dir: &str) -> Result<()> {
     #[cfg(not(windows))]
     {
         let shim_path = Path::new(bin_dir).join("tooler-shim");
-        if !shim_path.exists() {
-            fs::create_dir_all(bin_dir)?;
-            let shim_content =
-            "#!/bin/bash\ntool_name=$(basename \"$0\")\nexec tooler run \"$tool_name\" \"$@\"\n";
+        fs::create_dir_all(bin_dir)?;
+
+        let tooler_bin = std::env::current_exe()?;
+        let tooler_bin = shell_quote(&tooler_bin.to_string_lossy());
+        let shim_content = format!(
+            r#"#!/bin/bash
+set -u
+
+tool_name="${{0##*/}}"
+tooler_bin={tooler_bin}
+log_dir="${{TOOLER_STATE_DIR:-${{XDG_STATE_HOME:-${{HOME:-.}}/.local/state}}/tooler}}"
+log_file="${{TOOLER_SHIM_LOG:-$log_dir/shim.log}}"
+
+log_failure() {{
+    mkdir -p "$log_dir" 2>/dev/null || true
+    timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || printf unknown)
+    printf '%s tool=%s error=%s tooler_bin=%s\n' "$timestamp" "$tool_name" "$1" "$tooler_bin" >> "$log_file" 2>/dev/null || true
+}}
+
+if [ ! -x "$tooler_bin" ]; then
+    log_failure "tooler-binary-missing-or-not-executable"
+    fallback=$(command -v tooler 2>/dev/null || true)
+    if [ -n "$fallback" ] && [ -x "$fallback" ] && [ "$fallback" != "$0" ]; then
+        tooler_bin="$fallback"
+    else
+        echo "tooler shim error: tooler binary is missing or not executable: $tooler_bin" >&2
+        echo "tooler shim error: details logged to $log_file" >&2
+        exit 127
+    fi
+fi
+
+exec "$tooler_bin" run "$tool_name" "$@"
+status=$?
+log_failure "exec-failed-status-$status"
+exit "$status"
+"#
+        );
+
+        let needs_write = match fs::read_to_string(&shim_path) {
+            Ok(existing) => existing != shim_content,
+            Err(_) => true,
+        };
+
+        if needs_write {
             fs::write(&shim_path, shim_content)?;
 
             #[cfg(unix)]
@@ -852,30 +892,14 @@ fn create_shim_script(bin_dir: &str) -> Result<()> {
                 fs::set_permissions(&shim_path, perms)?;
             }
             tracing::info!("Created shim script at {}", shim_path.display());
-        } else {
-            // Verify existing shim is a script, not a binary
-            if let Ok(metadata) = fs::metadata(&shim_path) {
-                if metadata.is_file() {
-                    if let Ok(content) = fs::read_to_string(&shim_path) {
-                        if !content.starts_with("#!/bin/bash") {
-                            tracing::warn!("tooler-shim exists but is not a script. Recreating...");
-                            let shim_content = "#!/bin/bash\ntool_name=$(basename \"$0\")\nexec tooler run \"$tool_name\" \"$@\"\n";
-                            fs::write(&shim_path, shim_content)?;
-
-                            #[cfg(unix)]
-                            {
-                                use std::os::unix::fs::PermissionsExt;
-                                let mut perms = fs::metadata(&shim_path)?.permissions();
-                                perms.set_mode(0o755);
-                                fs::set_permissions(&shim_path, perms)?;
-                            }
-                        }
-                    }
-                }
-            }
         }
         Ok(())
     }
+}
+
+#[cfg(not(windows))]
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 /// Strip platform-specific suffixes from a binary name.

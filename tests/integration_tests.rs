@@ -2,6 +2,7 @@ mod common;
 
 use common::{CommandOutput, TestContext};
 use std::fs;
+use std::process::Command;
 
 #[test]
 fn test_help_and_version() {
@@ -131,6 +132,55 @@ fn test_auto_shim_creation() {
         "tool shim was not created at {}",
         tool_shim.display()
     );
+
+    #[cfg(not(windows))]
+    {
+        let shim_content =
+            fs::read_to_string(&shim_script).expect("Failed to read generated shim script");
+        assert!(
+            shim_content.contains(ctx.bin_path.to_string_lossy().as_ref()),
+            "tooler-shim should dispatch through the absolute tooler path that created it"
+        );
+
+        let output: CommandOutput = Command::new(&tool_shim)
+            .env("TOOLER_CONFIG_PATH", &ctx.config_path)
+            .env("TOOLER_BIN_DIR", &ctx.bin_dir)
+            .env("HOME", ctx._temp_dir.path())
+            .env("XDG_DATA_HOME", ctx._temp_dir.path().join("data"))
+            .env("XDG_CONFIG_HOME", ctx._temp_dir.path().join("config"))
+            .env("PATH", "/nonexistent")
+            .arg("version")
+            .output()
+            .expect("Failed to run tool shim")
+            .into();
+
+        output.assert_success().assert_stdout_contains("tooler");
+
+        let broken_content = shim_content.replace(
+            ctx.bin_path.to_string_lossy().as_ref(),
+            "/nonexistent/tooler",
+        );
+        fs::write(&shim_script, broken_content).expect("Failed to write broken shim script");
+        let shim_log = ctx._temp_dir.path().join("shim.log");
+        let output: CommandOutput = Command::new(&tool_shim)
+            .env("TOOLER_CONFIG_PATH", &ctx.config_path)
+            .env("TOOLER_BIN_DIR", &ctx.bin_dir)
+            .env("HOME", ctx._temp_dir.path())
+            .env("XDG_DATA_HOME", ctx._temp_dir.path().join("data"))
+            .env("XDG_CONFIG_HOME", ctx._temp_dir.path().join("config"))
+            .env("TOOLER_SHIM_LOG", &shim_log)
+            .env("PATH", "/nonexistent")
+            .arg("version")
+            .output()
+            .expect("Failed to run broken tool shim")
+            .into();
+
+        assert!(!output.status.success(), "broken shim should fail");
+        output.assert_output_contains("details logged");
+        let log_content = fs::read_to_string(&shim_log).expect("Failed to read shim log");
+        assert!(log_content.contains("tool=dummy-tool"));
+        assert!(log_content.contains("tooler-binary-missing-or-not-executable"));
+    }
 }
 
 #[test]

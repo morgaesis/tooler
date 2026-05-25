@@ -152,7 +152,10 @@ Settings are stored in `~/.config/tooler/config.json`. Overrides are supported v
 - `parse-release-body`: Parse release notes for download URLs when assets don't match (default: true, env: `TOOLER_PARSE_RELEASE_BODY`)
 - `bin-dir`: Directory for binaries and shims (default: `~/.local/share/tooler/bin`, env: `TOOLER_BIN_DIR`)
 
-Logging is controlled via `LOG_LEVEL` or `TOOLER_LOG_LEVEL`.
+Logging is controlled via `LOG_LEVEL` or `TOOLER_LOG_LEVEL`. Unix shim dispatch
+failures are also recorded locally at
+`$XDG_STATE_HOME/tooler/shim.log` or `~/.local/state/tooler/shim.log`; override
+with `TOOLER_SHIM_LOG` when debugging isolated runs.
 
 ## Development
 
