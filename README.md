@@ -34,6 +34,12 @@ or install from scratch
 curl -sSL https://raw.githubusercontent.com/morgaesis/tooler/main/install.sh | bash
 ```
 
+On Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/morgaesis/tooler/main/install.ps1 | iex
+```
+
 See [INSTALL.md](INSTALL.md) for platform details, from-source builds, and troubleshooting.
 
 ## Usage

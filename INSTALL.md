@@ -44,6 +44,18 @@ tooler update tooler
 
 The install script registers tooler as a self-managed tool automatically.
 
+To skip self-management registration during install, set `TOOLER_NO_BOOTSTRAP=1`.
+The installer will still copy the binary and update PATH:
+
+```bash
+TOOLER_NO_BOOTSTRAP=1 curl -sSL https://raw.githubusercontent.com/morgaesis/tooler/main/install.sh | bash
+```
+
+```powershell
+$env:TOOLER_NO_BOOTSTRAP = '1'
+irm https://raw.githubusercontent.com/morgaesis/tooler/main/install.ps1 | iex
+```
+
 ## From Source
 
 Requires Rust toolchain (rustup.rs):

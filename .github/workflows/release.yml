@@ -110,9 +110,74 @@ jobs:
           name: ${{ matrix.target }}
           path: dist/${{ matrix.asset_name }}
 
+  native_e2e:
+    name: Native E2E (${{ matrix.os }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-2025-vs2026]
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8  # stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32  # v2
+        with:
+          key: release-e2e-${{ matrix.os }}
+
+      - name: Build tooler
+        run: cargo build --release
+
+      - name: Install local tooler (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p "$RUNNER_TEMP/tooler-bin"
+          cp target/release/tooler "$RUNNER_TEMP/tooler-bin/tooler"
+          chmod +x "$RUNNER_TEMP/tooler-bin/tooler"
+          echo "$RUNNER_TEMP/tooler-bin" >> "$GITHUB_PATH"
+
+      - name: Install local tooler (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\tooler-bin" | Out-Null
+          Copy-Item target\release\tooler.exe "$env:RUNNER_TEMP\tooler-bin\tooler.exe" -Force
+          "$env:RUNNER_TEMP\tooler-bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Pull cli/cli and verify shim (Unix)
+        if: runner.os != 'Windows'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TOOLER_CONFIG: ${{ runner.temp }}/tooler-e2e/config/config.json
+          TOOLER_DATA_DIR: ${{ runner.temp }}/tooler-e2e/data
+          TOOLER_BIN_DIR: ${{ runner.temp }}/tooler-bin
+        run: |
+          tooler version
+          tooler pull cli/cli
+          gh --version
+          tooler info cli/cli
+
+      - name: Pull cli/cli and verify shim (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TOOLER_CONFIG: ${{ runner.temp }}\tooler-e2e\config\config.json
+          TOOLER_DATA_DIR: ${{ runner.temp }}\tooler-e2e\data
+          TOOLER_BIN_DIR: ${{ runner.temp }}\tooler-bin
+        run: |
+          tooler version
+          tooler pull cli/cli
+          gh --version
+          tooler info cli/cli
+
   release:
     name: Create GitHub Release
-    needs: build
+    needs: [build, native_e2e]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -124,15 +189,19 @@ jobs:
         with:
           path: artifacts
 
-      - name: Create release-specific install script
+      - name: Create release-specific install scripts
         run: |
-          # Create a version-locked install.sh for this release
+          # Create version-locked install scripts for this release
           mkdir -p dist
           cp install.sh dist/install.sh
+          cp install.ps1 dist/install.ps1
           # Substitute the version between the markers
-          sed -i 's/TOOLER_VERSION=""/TOOLER_VERSION="${{ github.ref_name }}"/' dist/install.sh
+          sed -i 's/TOOLER_VERSION="${TOOLER_VERSION:-}"/TOOLER_VERSION="${{ github.ref_name }}"/' dist/install.sh
+          sed -i 's/\[string\]\$ToolerVersion = ""/[string]$ToolerVersion = "${{ github.ref_name }}"/' dist/install.ps1
           echo "Created release-specific install.sh for ${{ github.ref_name }}"
           grep "TOOLER_VERSION=" dist/install.sh | head -1
+          echo "Created release-specific install.ps1 for ${{ github.ref_name }}"
+          grep "TOOLER_VERSION=" dist/install.ps1 | head -1
 
       - name: Create Release
         uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda  # v3
@@ -141,3 +210,4 @@ jobs:
             artifacts/**/*.tar.gz
             artifacts/**/*.zip
             dist/install.sh
+            dist/install.ps1

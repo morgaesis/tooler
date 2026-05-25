@@ -8,7 +8,7 @@ set -eo pipefail
 
 # Embedded version (set during release build via sed substitution)
 # RELEASE_VERSION_MARKER_START
-TOOLER_VERSION=""
+TOOLER_VERSION="${TOOLER_VERSION:-}"
 # RELEASE_VERSION_MARKER_END
 
 if [[ -n "$TOOLER_VERSION" ]]; then
@@ -146,8 +146,16 @@ rm -rf "$TEMP_DIR"
 
 # Bootstrap: register tooler as a tool managed by itself for future self-updates
 export PATH="$INSTALL_DIR:$PATH"
-echo "Registering tooler for self-updates..."
-"$INSTALL_DIR/tooler" pull morgaesis/tooler 2>/dev/null || true
+if [[ "${TOOLER_NO_BOOTSTRAP:-}" == "1" || "${TOOLER_NO_BOOTSTRAP:-}" == "true" ]]; then
+  echo "Skipping self-update registration."
+else
+  if [[ ! -x "$INSTALL_DIR/tooler" ]]; then
+    echo "ERROR: Installed tooler binary was not found at $INSTALL_DIR/tooler"
+    exit 1
+  fi
+  echo "Registering tooler for self-updates..."
+  "$INSTALL_DIR/tooler" pull morgaesis/tooler 2>/dev/null || true
+fi
 
 echo "Installation complete!"
 echo "Tooler and its managed tools are now in your PATH."

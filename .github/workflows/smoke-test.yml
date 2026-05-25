@@ -8,24 +8,38 @@ on:
 
 jobs:
   smoke-test:
-    name: Post-release Smoke Test
-    runs-on: ubuntu-latest
+    name: Post-release Smoke Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-2025-vs2026]
     steps:
       - name: Install tooler via pipe-bash
+        if: runner.os != 'Windows'
         run: |
           curl -sSL https://raw.githubusercontent.com/morgaesis/tooler/main/install.sh | bash
 
       - name: Add tooler to PATH
+        if: runner.os != 'Windows'
         run: echo "$HOME/.local/share/tooler/bin" >> $GITHUB_PATH
+
+      - name: Install tooler via pipe-powershell
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          irm https://raw.githubusercontent.com/morgaesis/tooler/main/install.ps1 | iex
+          "$env:LOCALAPPDATA\tooler\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Verify tooler installation
         run: |
           tooler version
           tooler --help
 
-      - name: Test self-management (run tooler with tooler)
+      - name: Pull cli/cli and verify shim
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # This verifies that tooler can fetch and run its own latest release
-          tooler run morgaesis/tooler --version
+          tooler pull cli/cli
+          gh --version
+          tooler info cli/cli

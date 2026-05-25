@@ -1,10 +1,18 @@
 param(
-    [string]$ToolerVersion = $env:TOOLER_VERSION,
+    # Embedded version (set during release build via sed substitution)
+    # RELEASE_VERSION_MARKER_START
+    [string]$ToolerVersion = "",
+    # RELEASE_VERSION_MARKER_END
     [string]$InstallDir = "$env:LOCALAPPDATA\tooler\bin",
-    [switch]$NoPathUpdate
+    [switch]$NoPathUpdate,
+    [switch]$NoBootstrap
 )
 
 $ErrorActionPreference = "Stop"
+
+if (-not $ToolerVersion -and $env:TOOLER_VERSION) {
+    $ToolerVersion = $env:TOOLER_VERSION
+}
 
 if ($ToolerVersion) {
     Write-Host "Installing tooler $ToolerVersion..."
@@ -103,11 +111,19 @@ try {
         $env:Path = "$InstallDir;$env:Path"
     }
 
-    Write-Host "Registering tooler for self-updates..."
-    try {
-        & $targetExe pull morgaesis/tooler 2>$null
-    } catch {
-        Write-Warning "Self-update registration skipped: $($_.Exception.Message)"
+    if (-not $NoBootstrap -and $env:TOOLER_NO_BOOTSTRAP -ne "1" -and $env:TOOLER_NO_BOOTSTRAP -ne "true") {
+        if (-not (Test-Path $targetExe -PathType Leaf)) {
+            throw "Installed tooler.exe was not found at $targetExe."
+        }
+
+        Write-Host "Registering tooler for self-updates..."
+        try {
+            & $targetExe pull morgaesis/tooler 2>$null
+        } catch {
+            Write-Warning "Self-update registration skipped: $($_.Exception.Message)"
+        }
+    } else {
+        Write-Host "Skipping self-update registration."
     }
 
     Write-Host "Installation complete."
