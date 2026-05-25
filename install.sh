@@ -61,8 +61,8 @@ else
     echo ""
     echo "Workarounds:"
     echo "  1. Install 'gh' CLI and authenticate: gh auth login"
-    echo "  2. Set TOOLER_VERSION manually: TOOLER_VERSION=v0.6.3 bash install.sh"
-    echo "  3. Download directly from: https://github.com/morgaesis/tooler/releases/latest"
+    echo "  2. Download the latest release directly from: https://github.com/morgaesis/tooler/releases/latest"
+    echo "  3. Set TOOLER_VERSION manually to a release tag from: https://github.com/morgaesis/tooler/releases"
     exit 1
   fi
 

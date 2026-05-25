@@ -26,10 +26,10 @@ irm https://raw.githubusercontent.com/morgaesis/tooler/main/install.ps1 | iex
 
 This installs `tooler.exe` to `%LOCALAPPDATA%\tooler\bin`, adds that directory to your user PATH, and registers tooler as a self-managed tool. Open a new PowerShell session after installation so PATH changes are picked up.
 
-To install a specific version:
+To install a specific release from [GitHub Releases](https://github.com/morgaesis/tooler/releases):
 
 ```powershell
-$env:TOOLER_VERSION = 'v0.7.1'
+$env:TOOLER_VERSION = 'vX.Y.Z'
 irm https://raw.githubusercontent.com/morgaesis/tooler/main/install.ps1 | iex
 ```
 
@@ -82,7 +82,7 @@ The LLVM MinGW package provides `dlltool.exe`, but it does not provide the GCC r
 Set `TOOLER_VERSION` before running the install script:
 
 ```bash
-TOOLER_VERSION=v0.6.3 curl -sSL https://raw.githubusercontent.com/morgaesis/tooler/main/install.sh | bash
+TOOLER_VERSION=vX.Y.Z curl -sSL https://raw.githubusercontent.com/morgaesis/tooler/main/install.sh | bash
 ```
 
 Or download a release directly from [GitHub Releases](https://github.com/morgaesis/tooler/releases).
@@ -157,7 +157,7 @@ Then remove `%LOCALAPPDATA%\tooler\bin` from your user PATH.
 GitHub API rate limits unauthenticated requests (60/hour). Workarounds:
 
 1. Install `gh` CLI and authenticate (`gh auth login`) before running the script
-2. Set the version explicitly: `TOOLER_VERSION=v0.6.3 bash install.sh`
+2. Install the latest release from [GitHub Releases](https://github.com/morgaesis/tooler/releases/latest)
 3. Download from [GitHub Releases](https://github.com/morgaesis/tooler/releases) directly
 
 **Windows source build fails before compiling tooler**
@@ -176,4 +176,4 @@ Tooler never bypasses GPG signing. Unlock your GPG keyring before running git op
 
 **`tooler update tooler` doesn't update the version**
 
-Versions before v0.6.3 don't support self-update. Reinstall via the install script or `cargo install --path .` to get self-update support.
+Older releases may not support self-update. Reinstall via the latest install script or `cargo install --path .` to get self-update support.

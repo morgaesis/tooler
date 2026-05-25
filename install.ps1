@@ -55,8 +55,8 @@ This is likely due to GitHub API rate limiting for unauthenticated requests.
 
 Workarounds:
   1. Install GitHub CLI and authenticate: gh auth login
-  2. Set TOOLER_VERSION manually: `$env:TOOLER_VERSION='v0.7.1'; irm https://raw.githubusercontent.com/morgaesis/tooler/main/install.ps1 | iex
-  3. Download directly from: https://github.com/morgaesis/tooler/releases/latest
+  2. Download the latest release directly from: https://github.com/morgaesis/tooler/releases/latest
+  3. Set TOOLER_VERSION manually to a release tag from: https://github.com/morgaesis/tooler/releases
 "@
         }
     }
