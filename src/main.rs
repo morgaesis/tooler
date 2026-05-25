@@ -1020,7 +1020,9 @@ fn create_tool_symlink(bin_dir: &str, tool_name: &str) -> Result<()> {
         let tool_file_name = format!("{}.cmd", command_name);
         let symlink_path = Path::new(bin_dir).join(tool_file_name);
 
-        if command_name.eq_ignore_ascii_case("tooler-shim") {
+        if command_name.eq_ignore_ascii_case("tooler-shim")
+            || command_name.eq_ignore_ascii_case("tooler")
+        {
             return Ok(());
         }
 
@@ -1040,7 +1042,7 @@ fn create_tool_symlink(bin_dir: &str, tool_name: &str) -> Result<()> {
         let shim_path = Path::new(bin_dir).join("tooler-shim");
         let symlink_path = Path::new(bin_dir).join(tool_name);
 
-        if tool_name == "tooler-shim" {
+        if tool_name == "tooler-shim" || tool_name == "tooler" {
             return Ok(());
         }
 
@@ -1060,5 +1062,32 @@ fn create_tool_symlink(bin_dir: &str, tool_name: &str) -> Result<()> {
             );
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod auto_shim_tests {
+    use super::*;
+
+    #[test]
+    fn test_auto_shim_does_not_create_tooler_command() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        create_shim_script(temp_dir.path().to_str().unwrap()).unwrap();
+        create_tool_symlink(temp_dir.path().to_str().unwrap(), "tooler").unwrap();
+
+        #[cfg(windows)]
+        let tooler_shim = temp_dir.path().join("tooler.cmd");
+        #[cfg(not(windows))]
+        let tooler_shim = temp_dir.path().join("tooler");
+
+        assert!(!tooler_shim.exists());
+        assert!(temp_dir
+            .path()
+            .join(if cfg!(windows) {
+                "tooler-shim.cmd"
+            } else {
+                "tooler-shim"
+            })
+            .exists());
     }
 }
