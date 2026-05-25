@@ -74,32 +74,28 @@ fn test_auto_shim_creation() {
 
     // Create a dummy config entry to simulate an installed tool
     // We'll use 'tooler' itself as the executable for the dummy entry
-    let bin_path = ctx.bin_path.to_str().unwrap();
-    let config_content = format!(
-        r#"{{
-        "tools": {{
-            "dummy/tool@latest": {{
+    let config_content = serde_json::json!({
+        "tools": {
+            "dummy/tool@latest": {
                 "tool_name": "dummy-tool",
                 "repo": "dummy/tool",
                 "version": "1.0.0",
-                "executable_path": "{}",
+                "executable_path": ctx.bin_path,
                 "install_type": "binary",
                 "pinned": true,
                 "installed_at": "2024-01-01T00:00:00Z",
                 "last_accessed": "2024-01-01T00:00:00Z",
                 "forge": "github"
-            }}
-        }},
-        "settings": {{
+            }
+        },
+        "settings": {
             "update_check_days": 60,
             "auto_shim": true,
             "auto_update": true,
-            "bin_dir": "{}"
-        }}
-    }}"#,
-        bin_path,
-        ctx.bin_dir.to_str().unwrap()
-    );
+            "bin_dir": ctx.bin_dir
+        }
+    })
+    .to_string();
 
     fs::write(&ctx.config_path, config_content).expect("Failed to write mock config");
 
@@ -115,6 +111,9 @@ fn test_auto_shim_creation() {
     output.assert_success();
 
     // Verify shim script exists
+    #[cfg(windows)]
+    let shim_script = ctx.bin_dir.join("tooler-shim.cmd");
+    #[cfg(not(windows))]
     let shim_script = ctx.bin_dir.join("tooler-shim");
     assert!(
         shim_script.exists(),
@@ -122,11 +121,14 @@ fn test_auto_shim_creation() {
         shim_script.display()
     );
 
-    // Verify tool symlink exists
+    // Verify tool shim exists
+    #[cfg(windows)]
+    let tool_shim = ctx.bin_dir.join("dummy-tool.cmd");
+    #[cfg(not(windows))]
     let tool_shim = ctx.bin_dir.join("dummy-tool");
     assert!(
         tool_shim.exists(),
-        "tool shim symlink was not created at {}",
+        "tool shim was not created at {}",
         tool_shim.display()
     );
 }
@@ -136,32 +138,28 @@ fn test_update_check_triggers() {
     let ctx = TestContext::new();
 
     // Mock a stale tool (last_accessed > 10 days ago, with settings.update_check_days = 5)
-    let bin_path = ctx.bin_path.to_str().unwrap();
-    let config_content = format!(
-        r#"{{
-        "tools": {{
-            "derailed/k9s@latest": {{
+    let config_content = serde_json::json!({
+        "tools": {
+            "derailed/k9s@latest": {
                 "tool_name": "k9s",
                 "repo": "derailed/k9s",
                 "version": "0.50.0",
-                "executable_path": "{}",
+                "executable_path": ctx.bin_path,
                 "install_type": "binary",
                 "pinned": false,
                 "installed_at": "2024-01-01T00:00:00Z",
                 "last_accessed": "2024-01-01T00:00:00Z",
                 "forge": "github"
-            }}
-        }},
-        "settings": {{
+            }
+        },
+        "settings": {
             "update_check_days": 5,
             "auto_shim": true,
             "auto_update": false,
-            "bin_dir": "{}"
-        }}
-    }}"#,
-        bin_path,
-        ctx.bin_dir.to_str().unwrap()
-    );
+            "bin_dir": ctx.bin_dir
+        }
+    })
+    .to_string();
 
     fs::write(&ctx.config_path, config_content).expect("Failed to write mock config");
 
@@ -176,6 +174,6 @@ fn test_update_check_triggers() {
 
     // It should check for updates. Even if it fails (no network), it should log the attempt.
     output
-        .assert_stdout_contains("Checking if derailed/k9s@latest needs update (threshold: 5 days)");
-    output.assert_stdout_contains("Checking for GitHub update for derailed/k9s");
+        .assert_output_contains("Checking if derailed/k9s@latest needs update (threshold: 5 days)");
+    output.assert_output_contains("Checking for GitHub update for derailed/k9s");
 }

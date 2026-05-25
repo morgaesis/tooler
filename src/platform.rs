@@ -386,12 +386,14 @@ pub fn is_musl_system() -> bool {
     }
 }
 
-pub fn check_binary_architecture(path: &std::path::Path) -> Result<bool> {
-    let system_arch = std::env::consts::ARCH;
+pub fn check_binary_architecture(_path: &std::path::Path) -> Result<bool> {
+    let _system_arch = std::env::consts::ARCH;
 
     #[cfg(unix)]
     {
         use std::io::Read;
+        let path = _path;
+        let system_arch = _system_arch;
         let mut file = std::fs::File::open(path)?;
         let mut magic = [0u8; 4];
         if file.read_exact(&mut magic).is_err() {

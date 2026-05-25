@@ -2,6 +2,26 @@ use std::fs;
 use std::process::Command;
 use tempfile::tempdir;
 
+fn tooler_cmd() -> Command {
+    Command::new(env!("CARGO_BIN_EXE_tooler"))
+}
+
+fn mock_binary_name(name: &str) -> String {
+    if cfg!(windows) {
+        format!("{}.cmd", name)
+    } else {
+        name.to_string()
+    }
+}
+
+fn mock_binary_content(name: &str, version: &str) -> String {
+    if cfg!(windows) {
+        format!("@echo off\r\necho {} version {}\r\n", name, version)
+    } else {
+        format!("#!/bin/bash\necho \"{} version {}\"", name, version)
+    }
+}
+
 #[test]
 fn test_e2e_self_healing() {
     let root = tempdir().expect("failed to create temp dir");
@@ -20,8 +40,8 @@ fn test_e2e_self_healing() {
     let tool_dir = data_dir.join(format!("tools/github/myauthor__mytool__{}/v1.0.0", arch));
     fs::create_dir_all(&tool_dir).unwrap();
 
-    let binary_path = tool_dir.join("mytool");
-    let binary_content = "#!/bin/bash\necho \"mytool version 1.0.0\"";
+    let binary_path = tool_dir.join(mock_binary_name("mytool"));
+    let binary_content = mock_binary_content("mytool", "1.0.0");
     fs::write(&binary_path, binary_content).unwrap();
 
     #[cfg(unix)]
@@ -32,9 +52,8 @@ fn test_e2e_self_healing() {
         fs::set_permissions(&binary_path, perms).unwrap();
     }
 
-    // Run tooler via cargo run
-    let output = Command::new("cargo")
-        .args(["run", "--quiet", "--", "mytool", "--version"])
+    let output = tooler_cmd()
+        .args(["mytool", "--version"])
         .env("TOOLER_CONFIG", config_dir.join("config.json"))
         .env("TOOLER_DATA_DIR", &data_dir)
         .output()
@@ -75,12 +94,12 @@ fn test_recovery_by_binary_name_when_dir_differs() {
         "amd64"
     };
     let bin_dir = data_dir.join(format!(
-        "tools/github/cli__cli__{}/v2.92.0/gh_2.92.0_linux_amd64/bin",
+        "tools/github/cli__cli__{}/v2.92.0/gh_2.92.0_windows_amd64/bin",
         arch
     ));
     fs::create_dir_all(&bin_dir).unwrap();
-    let binary_path = bin_dir.join("gh");
-    fs::write(&binary_path, "#!/bin/bash\necho \"gh version 2.92.0\"").unwrap();
+    let binary_path = bin_dir.join(mock_binary_name("gh"));
+    fs::write(&binary_path, mock_binary_content("gh", "2.92.0")).unwrap();
 
     #[cfg(unix)]
     {
@@ -90,8 +109,8 @@ fn test_recovery_by_binary_name_when_dir_differs() {
         fs::set_permissions(&binary_path, perms).unwrap();
     }
 
-    let output = Command::new("cargo")
-        .args(["run", "--quiet", "--", "gh", "--version"])
+    let output = tooler_cmd()
+        .args(["gh", "--version"])
         .env("TOOLER_CONFIG", config_dir.join("config.json"))
         .env("TOOLER_DATA_DIR", &data_dir)
         .output()
@@ -136,11 +155,15 @@ fn test_no_aggressive_fuzzy_matching() {
         arch
     ));
     fs::create_dir_all(&tool_dir).unwrap();
-    fs::write(tool_dir.join("minikube"), "#!/bin/bash\necho minikube").unwrap();
+    fs::write(
+        tool_dir.join(mock_binary_name("minikube")),
+        mock_binary_content("minikube", "1.31.0"),
+    )
+    .unwrap();
 
     // Run with 'mkb' - should NOT match minikube
-    let output = Command::new("cargo")
-        .args(["run", "--quiet", "--", "mkb", "--version"])
+    let output = tooler_cmd()
+        .args(["mkb", "--version"])
         .env("TOOLER_CONFIG", config_dir.join("config.json"))
         .env("TOOLER_DATA_DIR", &data_dir)
         .output()

@@ -1158,7 +1158,13 @@ mod tests {
 
         // Setup a mock tool 'kubernetes/kubectl' which also contains 'kubeadm'
         let temp_dir = tempfile::tempdir().unwrap();
+        #[cfg(windows)]
+        let kubectl_path = temp_dir.path().join("kubectl.exe");
+        #[cfg(not(windows))]
         let kubectl_path = temp_dir.path().join("kubectl");
+        #[cfg(windows)]
+        let kubeadm_path = temp_dir.path().join("kubeadm.exe");
+        #[cfg(not(windows))]
         let kubeadm_path = temp_dir.path().join("kubeadm");
 
         std::fs::write(&kubectl_path, "kubectl binary").unwrap();
@@ -1194,11 +1200,17 @@ mod tests {
         // 1. Test deduction by primary binary name
         let found = find_tool_executable(&config, "kubectl").unwrap();
         assert_eq!(found.repo, "kubernetes/kubectl");
+        #[cfg(windows)]
+        assert!(found.executable_path.ends_with("kubectl.exe"));
+        #[cfg(not(windows))]
         assert!(found.executable_path.ends_with("kubectl"));
 
         // 2. Test deduction of multi-binary 'kubeadm' from 'kubectl' installation
         let found_multi = find_tool_executable(&config, "kubeadm").unwrap();
         assert_eq!(found_multi.repo, "kubernetes/kubectl");
+        #[cfg(windows)]
+        assert!(found_multi.executable_path.ends_with("kubeadm.exe"));
+        #[cfg(not(windows))]
         assert!(found_multi.executable_path.ends_with("kubeadm"));
 
         // 3. Test aliases
@@ -1207,6 +1219,9 @@ mod tests {
             .insert("k".to_string(), "kubectl".to_string());
         let found_alias = find_tool_executable(&config, "k").unwrap();
         assert_eq!(found_alias.repo, "kubernetes/kubectl");
+        #[cfg(windows)]
+        assert!(found_alias.executable_path.ends_with("kubectl.exe"));
+        #[cfg(not(windows))]
         assert!(found_alias.executable_path.ends_with("kubectl"));
 
         // 4. Test alias to multi-binary
@@ -1215,6 +1230,9 @@ mod tests {
             .insert("ka".to_string(), "kubeadm".to_string());
         let found_alias_multi = find_tool_executable(&config, "ka").unwrap();
         assert_eq!(found_alias_multi.repo, "kubernetes/kubectl");
+        #[cfg(windows)]
+        assert!(found_alias_multi.executable_path.ends_with("kubeadm.exe"));
+        #[cfg(not(windows))]
         assert!(found_alias_multi.executable_path.ends_with("kubeadm"));
     }
 
@@ -1225,6 +1243,9 @@ mod tests {
         let now = Utc::now().to_rfc3339();
 
         let temp_dir = tempfile::tempdir().unwrap();
+        #[cfg(windows)]
+        let cmk_binary = temp_dir.path().join("cmk.windows.x86-64.exe");
+        #[cfg(not(windows))]
         let cmk_binary = temp_dir.path().join("cmk.linux.x86-64");
 
         std::fs::write(&cmk_binary, "cmk binary").unwrap();
@@ -1265,6 +1286,9 @@ mod tests {
         );
         let found_cmk = found_cmk.unwrap();
         assert_eq!(found_cmk.repo, "apache/cloudstack-cloudmonkey");
+        #[cfg(windows)]
+        assert!(found_cmk.executable_path.contains("cmk.windows.x86-64.exe"));
+        #[cfg(not(windows))]
         assert!(found_cmk.executable_path.contains("cmk.linux.x86-64"));
 
         // 3. Alias should also work

@@ -256,7 +256,7 @@ async fn main() -> Result<()> {
                         .unwrap_or_else(|| "unknown".to_string());
                     report_update(&repo_to_pull, old_version.as_deref(), &new_version);
                     tracing::info!("Path: {}", path.display());
-                    if config.settings.auto_shim && !cfg!(windows) {
+                    if config.settings.auto_shim {
                         if let Err(e) = setup_auto_shim(
                             &config.settings.bin_dir,
                             &tool_identifier.tool_name(),
@@ -695,7 +695,7 @@ async fn execute_run(
         }
 
         // Create shim if auto_shim is enabled
-        if config.settings.auto_shim && !cfg!(windows) {
+        if config.settings.auto_shim {
             if let Err(e) = setup_auto_shim(
                 &config.settings.bin_dir,
                 &tool_identifier.tool_name(),
@@ -821,44 +821,61 @@ fn setup_auto_shim(bin_dir: &str, primary_name: &str, executable_path: &Path) ->
 }
 
 fn create_shim_script(bin_dir: &str) -> Result<()> {
-    let shim_path = Path::new(bin_dir).join("tooler-shim");
-    if !shim_path.exists() {
+    #[cfg(windows)]
+    {
+        let shim_path = Path::new(bin_dir).join("tooler-shim.cmd");
         fs::create_dir_all(bin_dir)?;
         let shim_content =
-            "#!/bin/bash\ntool_name=$(basename \"$0\")\nexec tooler run \"$tool_name\" \"$@\"\n";
-        fs::write(&shim_path, shim_content)?;
-
-        #[cfg(unix)]
+            "@echo off\r\nset \"tool_name=%~n0\"\r\ntooler run \"%tool_name%\" %*\r\n";
+        if !shim_path.exists() || fs::read_to_string(&shim_path).unwrap_or_default() != shim_content
         {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&shim_path)?.permissions();
-            perms.set_mode(0o755);
-            fs::set_permissions(&shim_path, perms)?;
+            fs::write(&shim_path, shim_content)?;
+            tracing::info!("Created shim script at {}", shim_path.display());
         }
-        tracing::info!("Created shim script at {}", shim_path.display());
-    } else {
-        // Verify existing shim is a script, not a binary
-        if let Ok(metadata) = fs::metadata(&shim_path) {
-            if metadata.is_file() {
-                if let Ok(content) = fs::read_to_string(&shim_path) {
-                    if !content.starts_with("#!/bin/bash") {
-                        tracing::warn!("tooler-shim exists but is not a script. Recreating...");
-                        let shim_content = "#!/bin/bash\ntool_name=$(basename \"$0\")\nexec tooler run \"$tool_name\" \"$@\"\n";
-                        fs::write(&shim_path, shim_content)?;
+        return Ok(());
+    }
 
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::fs::PermissionsExt;
-                            let mut perms = fs::metadata(&shim_path)?.permissions();
-                            perms.set_mode(0o755);
-                            fs::set_permissions(&shim_path, perms)?;
+    #[cfg(not(windows))]
+    {
+        let shim_path = Path::new(bin_dir).join("tooler-shim");
+        if !shim_path.exists() {
+            fs::create_dir_all(bin_dir)?;
+            let shim_content =
+            "#!/bin/bash\ntool_name=$(basename \"$0\")\nexec tooler run \"$tool_name\" \"$@\"\n";
+            fs::write(&shim_path, shim_content)?;
+
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mut perms = fs::metadata(&shim_path)?.permissions();
+                perms.set_mode(0o755);
+                fs::set_permissions(&shim_path, perms)?;
+            }
+            tracing::info!("Created shim script at {}", shim_path.display());
+        } else {
+            // Verify existing shim is a script, not a binary
+            if let Ok(metadata) = fs::metadata(&shim_path) {
+                if metadata.is_file() {
+                    if let Ok(content) = fs::read_to_string(&shim_path) {
+                        if !content.starts_with("#!/bin/bash") {
+                            tracing::warn!("tooler-shim exists but is not a script. Recreating...");
+                            let shim_content = "#!/bin/bash\ntool_name=$(basename \"$0\")\nexec tooler run \"$tool_name\" \"$@\"\n";
+                            fs::write(&shim_path, shim_content)?;
+
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                let mut perms = fs::metadata(&shim_path)?.permissions();
+                                perms.set_mode(0o755);
+                                fs::set_permissions(&shim_path, perms)?;
+                            }
                         }
                     }
                 }
             }
         }
+        Ok(())
     }
-    Ok(())
 }
 
 /// Strip platform-specific suffixes from a binary name.
@@ -989,27 +1006,59 @@ fn display_github_error(tool_id: &str, gh_error: &install::github::GitHubRelease
 }
 
 fn create_tool_symlink(bin_dir: &str, tool_name: &str) -> Result<()> {
-    let shim_path = Path::new(bin_dir).join("tooler-shim");
-    let symlink_path = Path::new(bin_dir).join(tool_name);
+    #[cfg(windows)]
+    {
+        let shim_path = Path::new(bin_dir).join("tooler-shim.cmd");
+        let command_name = tool_name
+            .strip_suffix(".exe")
+            .or_else(|| tool_name.strip_suffix(".EXE"))
+            .or_else(|| tool_name.strip_suffix(".cmd"))
+            .or_else(|| tool_name.strip_suffix(".CMD"))
+            .or_else(|| tool_name.strip_suffix(".bat"))
+            .or_else(|| tool_name.strip_suffix(".BAT"))
+            .unwrap_or(tool_name);
+        let tool_file_name = format!("{}.cmd", command_name);
+        let symlink_path = Path::new(bin_dir).join(tool_file_name);
 
-    if tool_name == "tooler-shim" {
+        if command_name.eq_ignore_ascii_case("tooler-shim") {
+            return Ok(());
+        }
+
+        if !symlink_path.exists() {
+            fs::copy(&shim_path, &symlink_path)?;
+            tracing::info!(
+                "Created shim {} -> {}",
+                symlink_path.display(),
+                shim_path.display()
+            );
+        }
         return Ok(());
     }
 
-    if !symlink_path.exists() {
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(&shim_path, &symlink_path)?;
+    #[cfg(not(windows))]
+    {
+        let shim_path = Path::new(bin_dir).join("tooler-shim");
+        let symlink_path = Path::new(bin_dir).join(tool_name);
+
+        if tool_name == "tooler-shim" {
+            return Ok(());
         }
-        #[cfg(not(unix))]
-        {
-            fs::copy(&shim_path, &symlink_path)?;
+
+        if !symlink_path.exists() {
+            #[cfg(unix)]
+            {
+                std::os::unix::fs::symlink(&shim_path, &symlink_path)?;
+            }
+            #[cfg(not(unix))]
+            {
+                fs::copy(&shim_path, &symlink_path)?;
+            }
+            tracing::info!(
+                "Created symlink {} -> {}",
+                symlink_path.display(),
+                shim_path.display()
+            );
         }
-        tracing::info!(
-            "Created symlink {} -> {}",
-            symlink_path.display(),
-            shim_path.display()
-        );
+        Ok(())
     }
-    Ok(())
 }

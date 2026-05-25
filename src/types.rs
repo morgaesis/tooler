@@ -58,14 +58,32 @@ fn default_auto_update() -> bool {
     true
 }
 fn default_bin_dir() -> String {
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".local")
-        .join("share")
-        .join("tooler")
-        .join("bin")
-        .to_string_lossy()
-        .to_string()
+    #[cfg(windows)]
+    {
+        return dirs::data_local_dir()
+            .unwrap_or_else(|| {
+                dirs::home_dir()
+                    .unwrap_or_else(|| std::path::PathBuf::from("."))
+                    .join("AppData")
+                    .join("Local")
+            })
+            .join("tooler")
+            .join("bin")
+            .to_string_lossy()
+            .to_string();
+    }
+
+    #[cfg(not(windows))]
+    {
+        dirs::home_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join(".local")
+            .join("share")
+            .join("tooler")
+            .join("bin")
+            .to_string_lossy()
+            .to_string()
+    }
 }
 fn default_parse_release_body() -> bool {
     true

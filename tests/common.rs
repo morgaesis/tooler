@@ -88,4 +88,15 @@ impl CommandOutput {
         );
         self
     }
+
+    pub fn assert_output_contains(&self, text: &str) -> &Self {
+        assert!(
+            self.stdout.contains(text) || self.stderr.contains(text),
+            "Output did not contain '{}'\nActual stdout: {}\nActual stderr: {}",
+            text,
+            self.stdout,
+            self.stderr
+        );
+        self
+    }
 }

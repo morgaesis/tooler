@@ -15,9 +15,14 @@ pub fn get_user_data_dir() -> Result<PathBuf> {
         fs::create_dir_all(&path)?;
         return Ok(path);
     }
-    let path = dirs::data_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine data directory"))?
-        .join(APP_NAME);
+    #[cfg(windows)]
+    let base_data_dir = dirs::data_local_dir()
+        .ok_or_else(|| anyhow::anyhow!("Could not determine data directory"))?;
+    #[cfg(not(windows))]
+    let base_data_dir =
+        dirs::data_dir().ok_or_else(|| anyhow::anyhow!("Could not determine data directory"))?;
+
+    let path = base_data_dir.join(APP_NAME);
     tracing::debug!("User data directory: {}", path.display());
     fs::create_dir_all(&path)?;
     Ok(path)
@@ -176,6 +181,9 @@ mod tests {
         assert!(config.tools.is_empty());
         assert_eq!(config.settings.update_check_days, 60);
         assert!(config.settings.auto_shim);
+        #[cfg(windows)]
+        assert!(config.settings.bin_dir.contains("tooler"));
+        #[cfg(not(windows))]
         assert!(config.settings.bin_dir.contains(".local"));
     }
 }
