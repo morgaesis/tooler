@@ -3,6 +3,7 @@ mod common;
 use common::{CommandOutput, TestContext};
 use std::fs;
 use std::path::PathBuf;
+#[cfg(not(windows))]
 use std::process::Command;
 
 fn write_dummy_tool(ctx: &TestContext, dir_name: &str, tool_name: &str) -> PathBuf {
@@ -98,6 +99,41 @@ fn test_config_show_formats() {
     let _: serde_yaml::Value =
         serde_yaml::from_str(&output.stdout).expect("Output was not valid YAML");
     output.assert_stdout_contains("bin_dir:");
+}
+
+#[test]
+fn test_log_destination_writes_default_logfile() {
+    let ctx = TestContext::new();
+    let state_dir = ctx._temp_dir.path().join("state").join("tooler");
+    let log_file = state_dir.join("tooler.log");
+
+    let output: CommandOutput = ctx
+        .cmd()
+        .env("TOOLER_STATE_DIR", &state_dir)
+        .args(["-v", "--log-destination", "logfile", "version"])
+        .output()
+        .expect("Failed to run tooler")
+        .into();
+
+    output.assert_success().assert_stdout_contains("tooler");
+
+    assert!(
+        state_dir.exists(),
+        "log directory was not created at {}",
+        state_dir.display()
+    );
+    assert!(
+        log_file.exists(),
+        "log file was not created at {}",
+        log_file.display()
+    );
+
+    let log_content = fs::read_to_string(&log_file).expect("Failed to read tooler log file");
+    assert!(
+        log_content.contains("Logging initialized"),
+        "log file did not contain startup log event\nActual log content: {}",
+        log_content
+    );
 }
 
 #[test]

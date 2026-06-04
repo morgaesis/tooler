@@ -18,8 +18,10 @@ use install::{
 };
 use std::env;
 use std::fs;
-use std::path::Path;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use tool_id::ToolIdentifier;
 use types::{ReleaseBodyPolicy, ToolerConfig, ToolerSettings};
 
@@ -29,6 +31,7 @@ async fn main() -> Result<()> {
 
     // Setup logging
     setup_logging(&cli)?;
+    tracing::info!("Logging initialized");
 
     // Load configuration
     let mut config = load_tool_configs()?;
@@ -784,7 +787,7 @@ async fn execute_run(
 }
 
 fn setup_logging(cli: &Cli) -> Result<()> {
-    use tracing_subscriber::{fmt, EnvFilter};
+    use tracing_subscriber::EnvFilter;
 
     let level = if cli.quiet {
         "error"
@@ -805,14 +808,160 @@ fn setup_logging(cli: &Cli) -> Result<()> {
         })
         .unwrap_or_else(|_| EnvFilter::new(level));
 
+    let destinations = LogDestinations::parse(&log_destination_value(cli))?;
+    init_logging_subscriber(filter, destinations)
+}
+
+fn log_destination_value(cli: &Cli) -> String {
+    cli.log_destination
+        .clone()
+        .unwrap_or_else(|| "stderr,logfile".to_string())
+}
+
+fn init_logging_subscriber(
+    filter: tracing_subscriber::EnvFilter,
+    destinations: LogDestinations,
+) -> Result<()> {
+    use tracing_subscriber::fmt::writer::MakeWriterExt;
+
+    match (
+        destinations.stderr,
+        destinations.stdout,
+        destinations.logfile,
+    ) {
+        (false, false, false) => init_logging_with_writer(filter, io::sink),
+        (true, false, false) => init_logging_with_writer(filter, io::stderr),
+        (false, true, false) => init_logging_with_writer(filter, io::stdout),
+        (true, true, false) => init_logging_with_writer(filter, io::stderr.and(io::stdout)),
+        (false, false, true) => init_logging_with_writer(filter, Mutex::new(open_log_file()?)),
+        (true, false, true) => {
+            init_logging_with_writer(filter, io::stderr.and(Mutex::new(open_log_file()?)))
+        }
+        (false, true, true) => {
+            init_logging_with_writer(filter, io::stdout.and(Mutex::new(open_log_file()?)))
+        }
+        (true, true, true) => init_logging_with_writer(
+            filter,
+            io::stderr.and(io::stdout).and(Mutex::new(open_log_file()?)),
+        ),
+    }
+}
+
+fn init_logging_with_writer<W>(filter: tracing_subscriber::EnvFilter, writer: W) -> Result<()>
+where
+    W: for<'writer> tracing_subscriber::fmt::MakeWriter<'writer> + Send + Sync + 'static,
+{
+    use tracing_subscriber::fmt;
+
     fmt()
         .with_env_filter(filter)
+        .with_writer(writer)
         .with_target(false)
         .with_thread_ids(false)
         .with_thread_names(false)
         .init();
 
     Ok(())
+}
+
+struct LogDestinations {
+    stderr: bool,
+    stdout: bool,
+    logfile: bool,
+}
+
+impl LogDestinations {
+    fn parse(value: &str) -> Result<Self> {
+        let mut destinations = Self {
+            stderr: false,
+            stdout: false,
+            logfile: false,
+        };
+        let mut saw_none = false;
+        let mut saw_destination = false;
+
+        for raw in value.split(',') {
+            let destination = raw.trim().to_ascii_lowercase();
+            if destination.is_empty() {
+                continue;
+            }
+
+            match destination.as_str() {
+                "stderr" => {
+                    destinations.stderr = true;
+                    saw_destination = true;
+                }
+                "stdout" => {
+                    destinations.stdout = true;
+                    saw_destination = true;
+                }
+                "logfile" | "file" => {
+                    destinations.logfile = true;
+                    saw_destination = true;
+                }
+                "none" => saw_none = true,
+                _ => {
+                    return Err(anyhow!(
+                        "Invalid log destination '{}'. Use stderr, stdout, logfile, or none.",
+                        raw
+                    ));
+                }
+            }
+        }
+
+        if saw_none && saw_destination {
+            return Err(anyhow!(
+                "Log destination 'none' cannot be combined with other destinations"
+            ));
+        }
+
+        if !saw_none && !saw_destination {
+            return Err(anyhow!(
+                "At least one log destination is required: stderr, stdout, logfile, or none"
+            ));
+        }
+
+        Ok(destinations)
+    }
+}
+
+fn default_log_file_path() -> Result<PathBuf> {
+    if let Ok(path) = env::var("TOOLER_LOG_FILE") {
+        return Ok(PathBuf::from(path));
+    }
+
+    let state_dir = if let Ok(path) = env::var("TOOLER_STATE_DIR") {
+        PathBuf::from(path)
+    } else if let Ok(path) = env::var("XDG_STATE_HOME") {
+        PathBuf::from(path).join("tooler")
+    } else {
+        #[cfg(windows)]
+        {
+            dirs::data_local_dir()
+                .ok_or_else(|| anyhow!("Could not determine local data directory"))?
+                .join("tooler")
+        }
+
+        #[cfg(not(windows))]
+        {
+            let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+            PathBuf::from(home).join(".local/state/tooler")
+        }
+    };
+
+    Ok(state_dir.join("tooler.log"))
+}
+
+fn open_log_file() -> Result<fs::File> {
+    let path = default_log_file_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    Ok(fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?)
 }
 
 /// Report the outcome of an install/update to stderr in a default-verbosity

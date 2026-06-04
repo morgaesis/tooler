@@ -31,6 +31,10 @@ pub struct Cli {
     #[arg(short, long, global = true)]
     pub quiet: bool,
 
+    /// Comma-separated log destinations: stderr, stdout, logfile, or none (default: stderr,logfile)
+    #[arg(long, value_name = "DESTINATIONS")]
+    pub log_destination: Option<String>,
+
     #[command(subcommand)]
     pub command: Commands,
 }
