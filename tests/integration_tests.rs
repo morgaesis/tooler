@@ -51,7 +51,8 @@ fn test_help_and_version() {
     output
         .assert_success()
         .assert_stdout_contains("A CLI tool manager for GitHub Releases")
-        .assert_stdout_contains("Usage: tooler");
+        .assert_stdout_contains("Usage: tooler")
+        .assert_stdout_contains("--output <OUTPUTS>");
 
     // Test version
     let output: CommandOutput = ctx
@@ -110,7 +111,7 @@ fn test_log_destination_writes_default_logfile() {
     let output: CommandOutput = ctx
         .cmd()
         .env("TOOLER_STATE_DIR", &state_dir)
-        .args(["-v", "--log-destination", "logfile", "version"])
+        .args(["-v", "--output", "logfile", "version"])
         .output()
         .expect("Failed to run tooler")
         .into();
@@ -132,6 +133,29 @@ fn test_log_destination_writes_default_logfile() {
     assert!(
         log_content.contains("Logging initialized"),
         "log file did not contain startup log event\nActual log content: {}",
+        log_content
+    );
+}
+
+#[test]
+fn test_output_logfile_accepts_explicit_path() {
+    let ctx = TestContext::new();
+    let log_file = ctx._temp_dir.path().join("logs").join("tooler.log");
+    let output_arg = format!("logfile={}", log_file.to_string_lossy());
+
+    let output: CommandOutput = ctx
+        .cmd()
+        .args(["-v", "--output", &output_arg, "version"])
+        .output()
+        .expect("Failed to run tooler")
+        .into();
+
+    output.assert_success().assert_stdout_contains("tooler");
+
+    let log_content = fs::read_to_string(&log_file).expect("Failed to read explicit log file");
+    assert!(
+        log_content.contains("Logging initialized"),
+        "explicit log file did not contain startup log event\nActual log content: {}",
         log_content
     );
 }
@@ -260,14 +284,13 @@ fn test_info_respects_config_entry_when_binary_is_missing() {
         ._temp_dir
         .path()
         .join("data/tools/github/infisical__infisical__arm64/infisical-cli/v0.41.90/infisical");
-    let config_content = format!(
-        r#"{{
-        "tools": {{
-            "infisical/infisical@latest": {{
+    let config_content = serde_json::json!({
+        "tools": {
+            "infisical/infisical@latest": {
                 "tool_name": "infisical",
                 "repo": "infisical/infisical",
                 "version": "0.41.90",
-                "executable_path": "{}",
+                "executable_path": missing_path,
                 "install_type": "archive",
                 "pinned": false,
                 "installed_at": "2026-04-24T14:52:57.383004330+00:00",
@@ -275,18 +298,16 @@ fn test_info_respects_config_entry_when_binary_is_missing() {
                 "last_checked": "2026-04-24T14:52:57.383007905+00:00",
                 "forge": "github",
                 "original_url": null
-            }}
-        }},
-        "settings": {{
+            }
+        },
+        "settings": {
             "update_check_days": 60,
             "auto_shim": true,
             "auto_update": true,
-            "bin_dir": "{}"
-        }}
-    }}"#,
-        missing_path.to_string_lossy(),
-        ctx.bin_dir.to_string_lossy()
-    );
+            "bin_dir": ctx.bin_dir
+        }
+    })
+    .to_string();
 
     fs::write(&ctx.config_path, config_content).expect("Failed to write mock config");
 

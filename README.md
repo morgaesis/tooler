@@ -157,8 +157,8 @@ Settings are stored in `~/.config/tooler/config.json`. Overrides are supported v
 
 Logging level is controlled via `LOG_LEVEL` or `TOOLER_LOG_LEVEL`. Log output
 goes to both stderr and the default log file unless changed with
-`--log-destination`; pass a comma-separated list of `stderr`, `stdout`,
-`logfile`, or `none`.
+`--output`; pass a comma-separated list of `stderr`, `stdout`, `logfile`,
+`logfile=PATH`, or `none`.
 
 The default log file is `$XDG_STATE_HOME/tooler/tooler.log` or
 `~/.local/state/tooler/tooler.log` on Unix, and the local application data

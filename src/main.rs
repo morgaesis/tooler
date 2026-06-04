@@ -808,12 +808,12 @@ fn setup_logging(cli: &Cli) -> Result<()> {
         })
         .unwrap_or_else(|_| EnvFilter::new(level));
 
-    let destinations = LogDestinations::parse(&log_destination_value(cli))?;
+    let destinations = LogDestinations::parse(&output_value(cli))?;
     init_logging_subscriber(filter, destinations)
 }
 
-fn log_destination_value(cli: &Cli) -> String {
-    cli.log_destination
+fn output_value(cli: &Cli) -> String {
+    cli.output
         .clone()
         .unwrap_or_else(|| "stderr,logfile".to_string())
 }
@@ -827,22 +827,28 @@ fn init_logging_subscriber(
     match (
         destinations.stderr,
         destinations.stdout,
-        destinations.logfile,
+        destinations.logfile_path.is_some(),
     ) {
         (false, false, false) => init_logging_with_writer(filter, io::sink),
         (true, false, false) => init_logging_with_writer(filter, io::stderr),
         (false, true, false) => init_logging_with_writer(filter, io::stdout),
         (true, true, false) => init_logging_with_writer(filter, io::stderr.and(io::stdout)),
-        (false, false, true) => init_logging_with_writer(filter, Mutex::new(open_log_file()?)),
-        (true, false, true) => {
-            init_logging_with_writer(filter, io::stderr.and(Mutex::new(open_log_file()?)))
+        (false, false, true) => {
+            init_logging_with_writer(filter, Mutex::new(open_log_file(&destinations)?))
         }
-        (false, true, true) => {
-            init_logging_with_writer(filter, io::stdout.and(Mutex::new(open_log_file()?)))
-        }
+        (true, false, true) => init_logging_with_writer(
+            filter,
+            io::stderr.and(Mutex::new(open_log_file(&destinations)?)),
+        ),
+        (false, true, true) => init_logging_with_writer(
+            filter,
+            io::stdout.and(Mutex::new(open_log_file(&destinations)?)),
+        ),
         (true, true, true) => init_logging_with_writer(
             filter,
-            io::stderr.and(io::stdout).and(Mutex::new(open_log_file()?)),
+            io::stderr
+                .and(io::stdout)
+                .and(Mutex::new(open_log_file(&destinations)?)),
         ),
     }
 }
@@ -867,7 +873,7 @@ where
 struct LogDestinations {
     stderr: bool,
     stdout: bool,
-    logfile: bool,
+    logfile_path: Option<PathBuf>,
 }
 
 impl LogDestinations {
@@ -875,7 +881,7 @@ impl LogDestinations {
         let mut destinations = Self {
             stderr: false,
             stdout: false,
-            logfile: false,
+            logfile_path: None,
         };
         let mut saw_none = false;
         let mut saw_destination = false;
@@ -883,6 +889,16 @@ impl LogDestinations {
         for raw in value.split(',') {
             let destination = raw.trim().to_ascii_lowercase();
             if destination.is_empty() {
+                continue;
+            }
+
+            if let Some(raw_path) = raw.trim().strip_prefix("logfile=") {
+                let path = raw_path.trim();
+                if path.is_empty() {
+                    return Err(anyhow!("Log output 'logfile=' requires a path"));
+                }
+                destinations.logfile_path = Some(PathBuf::from(path));
+                saw_destination = true;
                 continue;
             }
 
@@ -896,7 +912,7 @@ impl LogDestinations {
                     saw_destination = true;
                 }
                 "logfile" | "file" => {
-                    destinations.logfile = true;
+                    destinations.logfile_path = Some(default_log_file_path()?);
                     saw_destination = true;
                 }
                 "none" => saw_none = true,
@@ -952,8 +968,11 @@ fn default_log_file_path() -> Result<PathBuf> {
     Ok(state_dir.join("tooler.log"))
 }
 
-fn open_log_file() -> Result<fs::File> {
-    let path = default_log_file_path()?;
+fn open_log_file(destinations: &LogDestinations) -> Result<fs::File> {
+    let path = destinations
+        .logfile_path
+        .as_ref()
+        .ok_or_else(|| anyhow!("Log output requested without a logfile path"))?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
