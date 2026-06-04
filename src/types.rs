@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::cmp::PartialEq;
 use std::collections::HashMap;
 
@@ -44,8 +44,11 @@ pub struct ToolerSettings {
     pub auto_update: bool,
     #[serde(default = "default_bin_dir", alias = "shim_dir")]
     pub bin_dir: String,
-    #[serde(default = "default_parse_release_body")]
-    pub parse_release_body: bool,
+    #[serde(
+        default = "default_parse_release_body",
+        deserialize_with = "deserialize_release_body_policy"
+    )]
+    pub parse_release_body: ReleaseBodyPolicy,
 }
 
 fn default_update_check_days() -> i32 {
@@ -85,8 +88,8 @@ fn default_bin_dir() -> String {
             .to_string()
     }
 }
-fn default_parse_release_body() -> bool {
-    true
+fn default_parse_release_body() -> ReleaseBodyPolicy {
+    ReleaseBodyPolicy::Ask
 }
 
 impl Default for ToolerSettings {
@@ -98,6 +101,52 @@ impl Default for ToolerSettings {
             bin_dir: default_bin_dir(),
             parse_release_body: default_parse_release_body(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ReleaseBodyPolicy {
+    Always,
+    Never,
+    #[default]
+    Ask,
+}
+
+impl ReleaseBodyPolicy {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "y" | "always" => Some(Self::Always),
+            "false" | "0" | "no" | "n" | "never" => Some(Self::Never),
+            "ask" | "prompt" => Some(Self::Ask),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for ReleaseBodyPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Always => write!(f, "always"),
+            Self::Never => write!(f, "never"),
+            Self::Ask => write!(f, "ask"),
+        }
+    }
+}
+
+fn deserialize_release_body_policy<'de, D>(deserializer: D) -> Result<ReleaseBodyPolicy, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::Bool(true) => Ok(ReleaseBodyPolicy::Always),
+        serde_json::Value::Bool(false) => Ok(ReleaseBodyPolicy::Never),
+        serde_json::Value::String(s) => ReleaseBodyPolicy::parse(&s)
+            .ok_or_else(|| serde::de::Error::custom("expected ask, always, never, true, or false")),
+        _ => Err(serde::de::Error::custom(
+            "expected ask, always, never, true, or false",
+        )),
     }
 }
 

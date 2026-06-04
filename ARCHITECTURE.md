@@ -50,7 +50,7 @@ Within a category:
 - OS and architecture are matched using alias tables (e.g., `aarch64` = `arm64`, `darwin` = `macos`).
 - 32-bit assets are rejected on 64-bit systems.
 - musl vs glibc libc variants are scored based on the host system (detected via `ldd --version`).
-- If no asset matches and `parse_release_body` is enabled, markdown links in the release body are parsed for download URLs matching the platform.
+- If no asset matches and `parse_release_body` allows it, markdown links in the release body are parsed for download URLs matching the platform. The default `ask` policy prompts before downloading a parsed URL.
 - `.whl` (Python wheel) files serve as a last-resort fallback.
 
 ## Executable Scoring
@@ -170,10 +170,10 @@ Stored as JSON at `~/.config/tooler/config.json` (overridable via `TOOLER_CONFIG
 | `update_check_days` | 60 | Days before a tool is considered stale |
 | `auto_shim` | true | Create shim symlinks automatically |
 | `auto_update` | true | Auto-update stale tools on run |
-| `parse_release_body` | true | Parse release notes for download URLs when no asset matches |
+| `parse_release_body` | ask | Parse release notes for download URLs when no asset matches (`ask`, `always`, `never`) |
 | `bin_dir` | `~/.local/share/tooler/bin/` | Directory for shim symlinks |
 
-All settings can be overridden by environment variables: `TOOLER_UPDATE_CHECK_DAYS`, `TOOLER_AUTO_SHIM`, `TOOLER_AUTO_UPDATE`, `TOOLER_BIN_DIR`. Data and config directories are overridable via `TOOLER_DATA_DIR` and `TOOLER_CONFIG_DIR`.
+All settings can be overridden by environment variables: `TOOLER_UPDATE_CHECK_DAYS`, `TOOLER_AUTO_SHIM`, `TOOLER_AUTO_UPDATE`, `TOOLER_PARSE_RELEASE_BODY`, `TOOLER_BIN_DIR`. Data and config directories are overridable via `TOOLER_DATA_DIR` and `TOOLER_CONFIG_DIR`.
 
 Key normalization converts between `kebab-case`, `snake_case`, and `camelCase` transparently.
 

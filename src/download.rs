@@ -317,6 +317,10 @@ pub fn is_executable(filepath: &Path, os_system: &str) -> bool {
         .map(|n| n.to_string_lossy().to_lowercase())
         .unwrap_or_default();
 
+    if file_name.starts_with('.') {
+        return false;
+    }
+
     // Skip common non-executable files that might have exec bit set (e.g. from archives)
     if matches!(
         file_name.as_str(),

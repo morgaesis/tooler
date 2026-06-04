@@ -71,7 +71,11 @@ pub enum Commands {
     },
 
     /// Pull latest version of a tool without updating existing installation
-    #[command(alias = "install")]
+    #[command(
+        alias = "install",
+        disable_version_flag = true,
+        after_help = "Note: 'pull' installs or refreshes a tool only. To run a tool with arguments, use 'tooler run <tool> <args>'."
+    )]
     Pull {
         /// Tool to pull (e.g., 'owner/repo' or 'tool-name')
         tool_id: String,

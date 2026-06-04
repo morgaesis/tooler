@@ -6,6 +6,7 @@ use crate::types::*;
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use std::fs;
+use std::io::{self, Write};
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
@@ -290,37 +291,48 @@ pub async fn install_or_update_tool(
                 )? {
                     Some(asset) => asset.download_url,
                     None => {
-                        let should_parse =
-                            parse_release_body.unwrap_or(config.settings.parse_release_body);
-                        if should_parse {
-                            tracing::debug!(
-                                "No asset found in release, checking release body for URLs"
-                            );
-                            release_info
-                                .body
-                                .as_ref()
-                                .and_then(|body| {
-                                    crate::platform::find_asset_in_release_body(
-                                        body,
-                                        &system_info.os,
-                                        &system_info.arch,
-                                    )
-                                })
-                                .map(|a| a.download_url)
-                                .ok_or_else(|| {
-                                    anyhow!(
-                                        "No suitable asset found for {} {} for your platform",
-                                        tool_identifier.full_repo(),
-                                        release_info.tag_name
-                                    )
-                                })?
-                        } else {
+                        let policy = match parse_release_body {
+                            Some(true) => ReleaseBodyPolicy::Always,
+                            Some(false) => ReleaseBodyPolicy::Never,
+                            None => config.settings.parse_release_body.clone(),
+                        };
+                        if policy == ReleaseBodyPolicy::Never {
                             return Err(anyhow!(
                                 "No suitable asset found for {} {} for your platform",
                                 tool_identifier.full_repo(),
                                 release_info.tag_name
                             ));
                         }
+
+                        tracing::debug!(
+                            "No asset found in release, checking release body for URLs"
+                        );
+                        let parsed_asset = release_info
+                            .body
+                            .as_ref()
+                            .and_then(|body| {
+                                crate::platform::find_asset_in_release_body(
+                                    body,
+                                    &system_info.os,
+                                    &system_info.arch,
+                                )
+                            })
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "No suitable asset found for {} {} for your platform",
+                                    tool_identifier.full_repo(),
+                                    release_info.tag_name
+                                )
+                            })?;
+
+                        approve_release_body_asset(
+                            config,
+                            &tool_identifier.full_repo(),
+                            &release_info.tag_name,
+                            &parsed_asset,
+                            policy,
+                        )?;
+                        parsed_asset.download_url
                     }
                 }
             };
@@ -427,6 +439,107 @@ pub async fn install_or_update_tool(
     save_tool_configs(config)?;
 
     Ok(executable_path)
+}
+
+fn approve_release_body_asset(
+    config: &mut ToolerConfig,
+    repo: &str,
+    version: &str,
+    asset: &AssetInfo,
+    policy: ReleaseBodyPolicy,
+) -> Result<()> {
+    match policy {
+        ReleaseBodyPolicy::Always => {
+            eprintln!(
+                "Release body parsing selected binary for {} {}: {}",
+                repo, version, asset.download_url
+            );
+            Ok(())
+        }
+        ReleaseBodyPolicy::Never => Err(anyhow!(
+            "Release body parsing is disabled; refusing parsed binary URL {}",
+            asset.download_url
+        )),
+        ReleaseBodyPolicy::Ask => {
+            eprintln!(
+                "Release body parsing selected binary for {} {}:",
+                repo, version
+            );
+            eprintln!("  {}", asset.download_url);
+            eprint!("Download this binary? [ask] once, [always], [never]: ");
+            io::stderr().flush()?;
+
+            let mut input = String::new();
+            io::stdin().read_line(&mut input)?;
+            match input.trim().to_ascii_lowercase().as_str() {
+                "ask" | "y" | "yes" => Ok(()),
+                "always" | "a" => {
+                    config.settings.parse_release_body = ReleaseBodyPolicy::Always;
+                    save_tool_configs(config)?;
+                    Ok(())
+                }
+                "never" | "n" | "no" => {
+                    config.settings.parse_release_body = ReleaseBodyPolicy::Never;
+                    save_tool_configs(config)?;
+                    Err(anyhow!("Release body binary download rejected"))
+                }
+                _ => Err(anyhow!("Release body binary download rejected")),
+            }
+        }
+    }
+}
+
+pub async fn reinstall_configured_tool(
+    config: &mut ToolerConfig,
+    config_key: &str,
+    configured: &ToolInfo,
+    requested_tool_id: &str,
+    asset_name: Option<&str>,
+    parse_release_body: Option<bool>,
+) -> Result<PathBuf> {
+    let install_target = reinstall_target_for_tool_info(configured, Some(requested_tool_id));
+    let executable_path = install_or_update_tool(
+        config,
+        &install_target,
+        false,
+        asset_name,
+        parse_release_body,
+    )
+    .await?;
+
+    let installed_key = ToolIdentifier::parse(&install_target)
+        .map_err(|e| anyhow!(e))?
+        .config_key();
+
+    if restore_configured_entry(config, config_key, &installed_key, configured) {
+        save_tool_configs(config)?;
+    }
+
+    Ok(executable_path)
+}
+
+fn restore_configured_entry(
+    config: &mut ToolerConfig,
+    config_key: &str,
+    installed_key: &str,
+    configured: &ToolInfo,
+) -> bool {
+    if installed_key == config_key {
+        return false;
+    }
+
+    let Some(mut repaired) = config.tools.remove(installed_key) else {
+        return false;
+    };
+
+    repaired.tool_name = configured.tool_name.clone();
+    repaired.repo = configured.repo.clone();
+    repaired.version = configured.version.clone();
+    repaired.pinned = configured.pinned;
+    repaired.forge = configured.forge.clone();
+    repaired.original_url = configured.original_url.clone();
+    config.tools.insert(config_key.to_string(), repaired);
+    true
 }
 
 pub fn pin_tool(config: &mut ToolerConfig, tool_id: &str) -> Result<()> {
@@ -762,6 +875,59 @@ pub fn find_tool_executable(config: &ToolerConfig, tool_query: &str) -> Option<T
     }
 
     Some(info)
+}
+
+pub fn reinstall_target_for_tool_info(info: &ToolInfo, requested_tool_id: Option<&str>) -> String {
+    if info.forge == Forge::Url {
+        if let Some(original_url) = &info.original_url {
+            return original_url.clone();
+        }
+        if let Some(requested_tool_id) = requested_tool_id {
+            if requested_tool_id.starts_with("http://") || requested_tool_id.starts_with("https://")
+            {
+                return requested_tool_id.to_string();
+            }
+        }
+    }
+
+    let version = configured_release_tag(info);
+    if version.is_empty() || version == "latest" || version == "default" {
+        info.repo.clone()
+    } else {
+        format!("{}@{}", info.repo, version)
+    }
+}
+
+fn configured_release_tag(info: &ToolInfo) -> String {
+    if info.version.contains('/') {
+        return info.version.clone();
+    }
+
+    let clean_version = info.version.trim_start_matches('v');
+    let version_with_v = format!("v{}", clean_version);
+    let components: Vec<String> = std::path::Path::new(&info.executable_path)
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .collect();
+
+    for (idx, component) in components.iter().enumerate().rev() {
+        if component != &info.version && component != clean_version && component != &version_with_v
+        {
+            continue;
+        }
+
+        let Some(prefix) = idx.checked_sub(1).and_then(|i| components.get(i)) else {
+            continue;
+        };
+
+        if prefix.contains("__") || matches!(prefix.as_str(), "tools" | "github" | "url") {
+            continue;
+        }
+
+        return format!("{}/{}", prefix, component);
+    }
+
+    info.version.clone()
 }
 
 pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
@@ -1301,5 +1467,155 @@ mod tests {
             "Expected alias 'cloudmonkey' -> 'cmk' to resolve"
         );
         assert_eq!(found_alias.unwrap().repo, "apache/cloudstack-cloudmonkey");
+    }
+
+    #[test]
+    fn test_reinstall_target_uses_configured_nested_release_tag_from_path() {
+        let info = ToolInfo {
+            tool_name: "infisical".to_string(),
+            repo: "infisical/infisical".to_string(),
+            version: "0.41.90".to_string(),
+            executable_path: "/home/me/.local/share/tooler/tools/github/infisical__infisical__arm64/infisical-cli/v0.41.90/infisical".to_string(),
+            install_type: "archive".to_string(),
+            pinned: false,
+            installed_at: "2026-04-24T14:52:57.383004330+00:00".to_string(),
+            last_accessed: "2026-05-21T22:42:46.660429251+00:00".to_string(),
+            last_checked: Some("2026-04-24T14:52:57.383007905+00:00".to_string()),
+            forge: crate::types::Forge::GitHub,
+            original_url: None,
+        };
+
+        assert_eq!(
+            reinstall_target_for_tool_info(&info, None),
+            "infisical/infisical@infisical-cli/v0.41.90"
+        );
+    }
+
+    #[test]
+    fn test_reinstall_target_keeps_simple_configured_version() {
+        let info = ToolInfo {
+            tool_name: "act".to_string(),
+            repo: "nektos/act".to_string(),
+            version: "v0.2.79".to_string(),
+            executable_path:
+                "/home/me/.local/share/tooler/tools/github/nektos__act__amd64/v0.2.79/act"
+                    .to_string(),
+            install_type: "archive".to_string(),
+            pinned: false,
+            installed_at: "2026-04-24T14:52:57Z".to_string(),
+            last_accessed: "2026-05-21T22:42:46Z".to_string(),
+            last_checked: None,
+            forge: crate::types::Forge::GitHub,
+            original_url: None,
+        };
+
+        assert_eq!(
+            reinstall_target_for_tool_info(&info, None),
+            "nektos/act@v0.2.79"
+        );
+    }
+
+    #[test]
+    fn test_reinstall_target_preserves_direct_url_tools() {
+        let info = ToolInfo {
+            tool_name: "kubectl".to_string(),
+            repo: "kubectl".to_string(),
+            version: "v1.31.0".to_string(),
+            executable_path:
+                "/home/me/.local/share/tooler/tools/url/direct__kubectl__arm64/v1.31.0/kubectl"
+                    .to_string(),
+            install_type: "binary".to_string(),
+            pinned: false,
+            installed_at: "2026-04-24T14:52:57Z".to_string(),
+            last_accessed: "2026-05-21T22:42:46Z".to_string(),
+            last_checked: None,
+            forge: crate::types::Forge::Url,
+            original_url: Some(
+                "https://dl.k8s.io/release/v1.31.0/bin/linux/arm64/kubectl".to_string(),
+            ),
+        };
+
+        assert_eq!(
+            reinstall_target_for_tool_info(&info, Some("kubectl")),
+            "https://dl.k8s.io/release/v1.31.0/bin/linux/arm64/kubectl"
+        );
+    }
+
+    #[test]
+    fn test_reinstall_target_uses_requested_url_when_direct_url_metadata_is_missing() {
+        let info = ToolInfo {
+            tool_name: "kubectl".to_string(),
+            repo: "kubectl".to_string(),
+            version: "v1.31.0".to_string(),
+            executable_path:
+                "/home/me/.local/share/tooler/tools/url/direct__kubectl__arm64/v1.31.0/kubectl"
+                    .to_string(),
+            install_type: "binary".to_string(),
+            pinned: false,
+            installed_at: "2026-04-24T14:52:57Z".to_string(),
+            last_accessed: "2026-05-21T22:42:46Z".to_string(),
+            last_checked: None,
+            forge: crate::types::Forge::Url,
+            original_url: None,
+        };
+
+        assert_eq!(
+            reinstall_target_for_tool_info(
+                &info,
+                Some("https://dl.k8s.io/release/v1.31.0/bin/linux/arm64/kubectl")
+            ),
+            "https://dl.k8s.io/release/v1.31.0/bin/linux/arm64/kubectl"
+        );
+    }
+
+    #[test]
+    fn test_restore_configured_entry_preserves_existing_config_key() {
+        let configured = ToolInfo {
+            tool_name: "infisical".to_string(),
+            repo: "infisical/infisical".to_string(),
+            version: "0.41.90".to_string(),
+            executable_path: "/missing/infisical".to_string(),
+            install_type: "archive".to_string(),
+            pinned: false,
+            installed_at: "2026-04-24T14:52:57Z".to_string(),
+            last_accessed: "2026-05-21T22:42:46Z".to_string(),
+            last_checked: None,
+            forge: crate::types::Forge::GitHub,
+            original_url: None,
+        };
+        let installed = ToolInfo {
+            tool_name: "infisical".to_string(),
+            repo: "infisical/infisical".to_string(),
+            version: "infisical-cli/v0.41.90".to_string(),
+            executable_path: "/restored/infisical".to_string(),
+            install_type: "gz".to_string(),
+            pinned: true,
+            installed_at: "2026-05-27T15:37:58Z".to_string(),
+            last_accessed: "2026-05-27T15:38:06Z".to_string(),
+            last_checked: Some("2026-05-27T15:37:58Z".to_string()),
+            forge: crate::types::Forge::GitHub,
+            original_url: None,
+        };
+        let mut config = ToolerConfig::default();
+        config.tools.insert(
+            "infisical/infisical@infisical-cli/v0.41.90".to_string(),
+            installed,
+        );
+
+        assert!(restore_configured_entry(
+            &mut config,
+            "infisical/infisical@latest",
+            "infisical/infisical@infisical-cli/v0.41.90",
+            &configured
+        ));
+
+        assert!(!config
+            .tools
+            .contains_key("infisical/infisical@infisical-cli/v0.41.90"));
+        let repaired = config.tools.get("infisical/infisical@latest").unwrap();
+        assert_eq!(repaired.version, "0.41.90");
+        assert!(!repaired.pinned);
+        assert_eq!(repaired.executable_path, "/restored/infisical");
+        assert_eq!(repaired.install_type, "gz");
     }
 }

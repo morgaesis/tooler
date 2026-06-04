@@ -116,6 +116,12 @@ fn apply_environment_overrides(config: &mut ToolerConfig) {
         config.settings.auto_update = auto_update.to_lowercase() == "true" || auto_update == "1";
     }
 
+    if let Ok(parse_release_body) = std::env::var("TOOLER_PARSE_RELEASE_BODY") {
+        if let Some(policy) = ReleaseBodyPolicy::parse(&parse_release_body) {
+            config.settings.parse_release_body = policy;
+        }
+    }
+
     if let Ok(bin_dir) = std::env::var("TOOLER_BIN_DIR") {
         config.settings.bin_dir = bin_dir;
     }
@@ -188,6 +194,37 @@ mod tests {
         assert!(config.settings.bin_dir.contains("tooler"));
         #[cfg(not(windows))]
         assert!(config.settings.bin_dir.contains(".local"));
+        assert_eq!(config.settings.parse_release_body, ReleaseBodyPolicy::Ask);
+    }
+
+    #[test]
+    fn test_parse_release_body_legacy_booleans() {
+        let always: ToolerConfig = serde_json::from_str(
+            r#"{
+                "tools": {},
+                "aliases": {},
+                "settings": {
+                    "parse_release_body": true
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(
+            always.settings.parse_release_body,
+            ReleaseBodyPolicy::Always
+        );
+
+        let never: ToolerConfig = serde_json::from_str(
+            r#"{
+                "tools": {},
+                "aliases": {},
+                "settings": {
+                    "parse_release_body": false
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(never.settings.parse_release_body, ReleaseBodyPolicy::Never);
     }
 
     #[test]

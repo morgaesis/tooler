@@ -184,6 +184,144 @@ fn test_auto_shim_creation() {
 }
 
 #[test]
+fn test_info_respects_config_entry_when_binary_is_missing() {
+    let ctx = TestContext::new();
+
+    let missing_path = ctx
+        ._temp_dir
+        .path()
+        .join("data/tools/github/infisical__infisical__arm64/infisical-cli/v0.41.90/infisical");
+    let config_content = format!(
+        r#"{{
+        "tools": {{
+            "infisical/infisical@latest": {{
+                "tool_name": "infisical",
+                "repo": "infisical/infisical",
+                "version": "0.41.90",
+                "executable_path": "{}",
+                "install_type": "archive",
+                "pinned": false,
+                "installed_at": "2026-04-24T14:52:57.383004330+00:00",
+                "last_accessed": "2026-05-21T22:42:46.660429251+00:00",
+                "last_checked": "2026-04-24T14:52:57.383007905+00:00",
+                "forge": "github",
+                "original_url": null
+            }}
+        }},
+        "settings": {{
+            "update_check_days": 60,
+            "auto_shim": true,
+            "auto_update": true,
+            "bin_dir": "{}"
+        }}
+    }}"#,
+        missing_path.to_string_lossy(),
+        ctx.bin_dir.to_string_lossy()
+    );
+
+    fs::write(&ctx.config_path, config_content).expect("Failed to write mock config");
+
+    let output: CommandOutput = ctx
+        .cmd()
+        .args(["info", "infisical"])
+        .output()
+        .expect("Failed to run tooler info")
+        .into();
+
+    output
+        .assert_success()
+        .assert_stdout_contains("Repository:    infisical/infisical")
+        .assert_stdout_contains("Version:       0.41.90")
+        .assert_stdout_contains(&missing_path.to_string_lossy());
+}
+
+#[test]
+#[cfg(unix)]
+fn test_stale_direct_url_entry_keeps_url_reinstall_target() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    let ctx = TestContext::new();
+    let listener = TcpListener::bind("127.0.0.1:0").expect("failed to bind test server");
+    let url = format!(
+        "http://127.0.0.1:{}/kubectl",
+        listener.local_addr().unwrap().port()
+    );
+
+    thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            let body = b"#!/bin/sh\necho kubectl fixture \"$@\"\n";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: application/octet-stream\r\n\r\n",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.write_all(body);
+        }
+    });
+
+    let missing_path = ctx
+        ._temp_dir
+        .path()
+        .join("data/tools/url/direct__kubectl__arm64/v1.31.0/kubectl");
+    let config_content = format!(
+        r#"{{
+        "tools": {{
+            "kubectl@latest": {{
+                "tool_name": "kubectl",
+                "repo": "kubectl",
+                "version": "v1.31.0",
+                "executable_path": "{}",
+                "install_type": "binary",
+                "pinned": false,
+                "installed_at": "2026-04-24T14:52:57Z",
+                "last_accessed": "2026-05-21T22:42:46Z",
+                "last_checked": "2026-04-24T14:52:57Z",
+                "forge": "url",
+                "original_url": "{}"
+            }}
+        }},
+        "settings": {{
+            "update_check_days": 0,
+            "auto_shim": false,
+            "auto_update": false,
+            "bin_dir": "{}"
+        }}
+    }}"#,
+        missing_path.to_string_lossy(),
+        url,
+        ctx.bin_dir.to_string_lossy()
+    );
+
+    fs::write(&ctx.config_path, config_content).expect("Failed to write mock config");
+
+    let output: CommandOutput = ctx
+        .cmd()
+        .args(["run", &url, "--version"])
+        .output()
+        .expect("Failed to run tooler")
+        .into();
+
+    output
+        .assert_success()
+        .assert_stdout_contains("kubectl fixture --version");
+
+    let output: CommandOutput = ctx
+        .cmd()
+        .args(["run", "kubectl", "version"])
+        .output()
+        .expect("Failed to run recovered tool")
+        .into();
+
+    output
+        .assert_success()
+        .assert_stdout_contains("kubectl fixture version");
+}
+
+#[test]
 fn test_update_check_triggers() {
     let ctx = TestContext::new();
 

@@ -7,7 +7,7 @@ A CLI tool manager for GitHub Releases written in Rust.
 - **Forge Support**: Seamlessly manages tools from GitHub Releases and direct URLs
 - **Direct URL Installation**: Install and shim any binary or archive from the internet directly
 - **Intelligent Discovery**: Automatically detects tool names and versions from URLs and attempts to discover updates via directory scraping
-- **Release Body Parsing**: When GitHub releases lack direct asset downloads, automatically parses release notes for download URLs (e.g., Helm's get.helm.sh pattern)
+- **Release Body Parsing**: When GitHub releases lack direct asset downloads, parses release notes for download URLs and asks before downloading parsed binaries (e.g., Helm's get.helm.sh pattern)
 - **Platform Detection**: Automatically detects your OS and architecture to download the right binaries
 - **Archive Support**: Extracts tar.gz, tar.xz, and zip archives
 - **Python Support**: Installs Python tools from wheel files with virtual environments
@@ -75,14 +75,17 @@ tooler run cmk --version
 
 ### Release Body Parsing
 
-Some projects (like Helm) upload only signature files to GitHub releases and host actual binaries elsewhere. Tooler handles this automatically by parsing release notes for download URLs:
+Some projects (like Helm) upload only signature files to GitHub releases and host actual binaries elsewhere. Tooler can parse release notes for download URLs and prompts before downloading a parsed binary by default:
 
 ```bash
-# Works automatically with release body parsing enabled (default)
+# Ask before downloading a URL parsed from the release body (default)
 tooler pull helm/helm
+# Prompt choices: ask (approve once), always, never
 
-# Disable release body parsing globally
-tooler config set parse-release-body=false
+# Choose release body parsing behavior globally
+tooler config set parse-release-body ask
+tooler config set parse-release-body always
+tooler config set parse-release-body never
 
 # Or disable per-command
 tooler pull helm/helm --no-parse-release-body
@@ -149,7 +152,7 @@ Settings are stored in `~/.config/tooler/config.json`. Overrides are supported v
 - `update-check-days`: Days between update checks (default: 60, env: `TOOLER_UPDATE_CHECK_DAYS`)
 - `auto-shim`: Create command-line shims (default: true, env: `TOOLER_AUTO_SHIM`)
 - `auto-update`: Automatically update tools on run (default: true, env: `TOOLER_AUTO_UPDATE`)
-- `parse-release-body`: Parse release notes for download URLs when assets don't match (default: true, env: `TOOLER_PARSE_RELEASE_BODY`)
+- `parse-release-body`: Parse release notes for download URLs when assets don't match (`ask`, `always`, `never`; default: `ask`, env: `TOOLER_PARSE_RELEASE_BODY`)
 - `bin-dir`: Directory for binaries and shims (default: `~/.local/share/tooler/bin`, env: `TOOLER_BIN_DIR`)
 
 Logging is controlled via `LOG_LEVEL` or `TOOLER_LOG_LEVEL`. Unix shim dispatch

@@ -14,14 +14,14 @@ use config::{load_tool_configs, normalize_key, save_tool_configs};
 use download::is_executable;
 use install::{
     check_for_updates, find_all_executables_in_tool_dir, find_tool_entry, find_tool_executable,
-    install_or_update_tool, list_installed_tools, pin_tool, remove_tool,
+    install_or_update_tool, list_installed_tools, pin_tool, reinstall_configured_tool, remove_tool,
 };
 use std::env;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
 use tool_id::ToolIdentifier;
-use types::{ToolerConfig, ToolerSettings};
+use types::{ReleaseBodyPolicy, ToolerConfig, ToolerSettings};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -357,8 +357,14 @@ async fn main() -> Result<()> {
                         tracing::info!("Setting '{}' updated to '{}'", normalized_key, value);
                     }
                     "parse_release_body" => {
-                        let value = value_str.to_lowercase() == "true" || value_str == "1";
-                        config.settings.parse_release_body = value;
+                        let Some(value) = ReleaseBodyPolicy::parse(&value_str) else {
+                            tracing::error!(
+                                "Invalid value for '{}'. Use ask, always, or never.",
+                                key
+                            );
+                            std::process::exit(1);
+                        };
+                        config.settings.parse_release_body = value.clone();
                         save_tool_configs(&config)?;
                         tracing::info!("Setting '{}' updated to '{}'", normalized_key, value);
                     }
@@ -479,6 +485,7 @@ async fn main() -> Result<()> {
 
                 // Invalidate stale entries (path missing or non-executable) so recovery runs.
                 let resolved_repo = info.as_ref().map(|i| i.repo.clone());
+                let mut configured_info = None;
                 if let Some(ref i) = info {
                     let p = Path::new(&i.executable_path);
                     if !p.exists() || !is_executable(p, &os) {
@@ -486,6 +493,7 @@ async fn main() -> Result<()> {
                             "Note: cached entry for '{}' points at missing/invalid binary ({}). Attempting recovery...",
                             tool_id, i.executable_path
                         );
+                        configured_info = Some(i.clone());
                         info = None;
                     }
                 }
@@ -503,6 +511,15 @@ async fn main() -> Result<()> {
                         config.tools.insert(key, recovered);
                         save_tool_configs(&config)?;
                         info = find_tool_executable(&config, tool_id);
+                    }
+                }
+
+                if info.is_none() {
+                    if let Some(configured) = configured_info {
+                        eprintln!(
+                            "Note: local recovery did not find a replacement binary; showing configured metadata."
+                        );
+                        info = Some(configured);
                     }
                 }
 
@@ -589,6 +606,8 @@ async fn execute_run(
     // Remember the resolved repo before any invalidation, so recovery & install
     // can use the real repo (e.g. "cli/cli") instead of the user's shortname ("gh").
     let resolved_repo: Option<String> = tool_info.as_ref().map(|i| i.repo.clone());
+    let configured_reinstall =
+        find_tool_entry(config, &tool_id).map(|(key, info)| (key.clone(), info.clone()));
 
     // Validate tool_info if found
     if let Some(ref info) = tool_info {
@@ -629,15 +648,28 @@ async fn execute_run(
                 tool_id
             );
         }
-        match install_or_update_tool(
-            config,
-            recovery_target,
-            false,
-            asset.as_deref(),
-            parse_release_body,
-        )
-        .await
-        {
+        let install_result = if let Some((key, configured)) = configured_reinstall.as_ref() {
+            reinstall_configured_tool(
+                config,
+                key,
+                configured,
+                &tool_id,
+                asset.as_deref(),
+                parse_release_body,
+            )
+            .await
+        } else {
+            install_or_update_tool(
+                config,
+                recovery_target,
+                false,
+                asset.as_deref(),
+                parse_release_body,
+            )
+            .await
+        };
+
+        match install_result {
             Ok(_) => {
                 *config = load_tool_configs()?; // Reload config
                 tool_info = find_tool_executable(config, &tool_id);
