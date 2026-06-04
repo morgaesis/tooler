@@ -2,7 +2,38 @@ mod common;
 
 use common::{CommandOutput, TestContext};
 use std::fs;
+use std::path::PathBuf;
 use std::process::Command;
+
+fn write_dummy_tool(ctx: &TestContext, dir_name: &str, tool_name: &str) -> PathBuf {
+    let dummy_tool_dir = ctx._temp_dir.path().join(dir_name);
+    fs::create_dir_all(&dummy_tool_dir).expect("Failed to create dummy tool dir");
+
+    #[cfg(windows)]
+    let dummy_tool = dummy_tool_dir.join(format!("{tool_name}.cmd"));
+    #[cfg(not(windows))]
+    let dummy_tool = dummy_tool_dir.join(tool_name);
+
+    #[cfg(windows)]
+    fs::write(&dummy_tool, "@echo off\r\necho dummy tool %*\r\n")
+        .expect("Failed to write dummy tool");
+
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::write(&dummy_tool, "#!/bin/sh\necho dummy tool \"$@\"\n")
+            .expect("Failed to write dummy tool");
+        let mut permissions = fs::metadata(&dummy_tool)
+            .expect("Failed to stat dummy tool")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&dummy_tool, permissions)
+            .expect("Failed to make dummy tool executable");
+    }
+
+    dummy_tool
+}
 
 #[test]
 fn test_help_and_version() {
@@ -72,16 +103,16 @@ fn test_config_show_formats() {
 #[test]
 fn test_auto_shim_creation() {
     let ctx = TestContext::new();
+    let dummy_tool = write_dummy_tool(&ctx, "auto-shim-tools", "dummy-tool");
 
     // Create a dummy config entry to simulate an installed tool
-    // We'll use 'tooler' itself as the executable for the dummy entry
     let config_content = serde_json::json!({
         "tools": {
             "dummy/tool@latest": {
                 "tool_name": "dummy-tool",
                 "repo": "dummy/tool",
                 "version": "1.0.0",
-                "executable_path": ctx.bin_path,
+                "executable_path": dummy_tool,
                 "install_type": "binary",
                 "pinned": true,
                 "installed_at": "2024-01-01T00:00:00Z",
@@ -154,7 +185,9 @@ fn test_auto_shim_creation() {
             .expect("Failed to run tool shim")
             .into();
 
-        output.assert_success().assert_stdout_contains("tooler");
+        output
+            .assert_success()
+            .assert_stdout_contains("dummy tool version");
 
         let broken_content = shim_content.replace(
             ctx.bin_path.to_string_lossy().as_ref(),
@@ -324,6 +357,7 @@ fn test_stale_direct_url_entry_keeps_url_reinstall_target() {
 #[test]
 fn test_update_check_triggers() {
     let ctx = TestContext::new();
+    let dummy_tool = write_dummy_tool(&ctx, "update-check-tools", "k9s");
 
     // Mock a stale tool (last_accessed > 10 days ago, with settings.update_check_days = 5)
     let config_content = serde_json::json!({
@@ -332,7 +366,7 @@ fn test_update_check_triggers() {
                 "tool_name": "k9s",
                 "repo": "derailed/k9s",
                 "version": "0.50.0",
-                "executable_path": ctx.bin_path,
+                "executable_path": dummy_tool,
                 "install_type": "binary",
                 "pinned": false,
                 "installed_at": "2024-01-01T00:00:00Z",
