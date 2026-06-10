@@ -21,6 +21,16 @@ fn get_version() -> &'static str {
 #[derive(Parser)]
 #[command(name = "tooler")]
 #[command(about = "A CLI tool manager for GitHub Releases")]
+#[command(
+    after_help = "Installed tools are exposed on PATH as lightweight launchers and are invoked \
+by name, exactly like the upstream binaries; tooler resolves the managed install at run time, \
+so there is no need to locate the underlying executable.\n\n\
+Quick start:\n  \
+tooler run <owner>/<repo> [args]   Run a tool (installs on first use)\n  \
+tooler list                        Show installed tools and versions\n  \
+tooler info <tool>                 Show install details for a tool\n  \
+tooler update [tool|all]           Update one or all tools"
+)]
 #[command(version = get_version(), propagate_version = true)]
 pub struct Cli {
     /// Increase verbosity (use multiple times for more detail)
