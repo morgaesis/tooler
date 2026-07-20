@@ -30,6 +30,7 @@ fn test_e2e_self_healing() {
 
     fs::create_dir_all(&config_dir).unwrap();
     fs::create_dir_all(&data_dir).unwrap();
+    fs::write(config_dir.join("config.json"), "").unwrap();
 
     // Create mock binary directory
     let arch = if cfg!(target_arch = "aarch64") {
@@ -69,6 +70,8 @@ fn test_e2e_self_healing() {
     let healed_config_path = config_dir.join("config.json");
     let healed_content =
         fs::read_to_string(&healed_config_path).expect("failed to read healed config");
+    serde_json::from_str::<serde_json::Value>(&healed_content)
+        .expect("recovered config must be valid JSON");
     assert!(
         healed_content.contains("myauthor/mytool@latest")
             || healed_content.contains("myauthor/mytool")

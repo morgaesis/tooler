@@ -1,7 +1,8 @@
 use crate::types::*;
 use anyhow::{Context, Result};
 
-use std::fs;
+use std::fs::{self, File};
+use std::io::Write;
 use std::path::PathBuf;
 
 pub const APP_NAME: &str = "tooler";
@@ -66,29 +67,34 @@ pub fn load_tool_configs() -> Result<ToolerConfig> {
         let content = fs::read_to_string(&config_path)
             .with_context(|| format!("Could not read config file at {}", config_path.display()))?;
 
-        match serde_json::from_str(&content) {
-            Ok(config) => config,
-            Err(e) => {
-                // Check if error is due to missing fields (partial config) vs malformed JSON
-                if e.is_data() {
-                    // Missing fields - try to parse as partial config and merge with defaults
-                    let mut default_config = ToolerConfig::default();
-                    if let Ok(partial_config) = serde_json::from_str::<ToolerConfig>(&content) {
-                        // Merge any valid settings from partial config
-                        if partial_config.settings.update_check_days != 0 {
-                            default_config.settings.update_check_days =
-                                partial_config.settings.update_check_days;
+        if content.trim().is_empty() {
+            ToolerConfig::default()
+        } else {
+            match serde_json::from_str(&content) {
+                Ok(config) => config,
+                Err(e) => {
+                    // Check if error is due to missing fields (partial config) vs malformed JSON
+                    if e.is_data() {
+                        // Missing fields - try to parse as partial config and merge with defaults
+                        let mut default_config = ToolerConfig::default();
+                        if let Ok(partial_config) = serde_json::from_str::<ToolerConfig>(&content) {
+                            // Merge any valid settings from partial config
+                            if partial_config.settings.update_check_days != 0 {
+                                default_config.settings.update_check_days =
+                                    partial_config.settings.update_check_days;
+                            }
+                            if !partial_config.settings.bin_dir.is_empty() {
+                                default_config.settings.bin_dir = partial_config.settings.bin_dir;
+                            }
+                            default_config.settings.auto_shim = partial_config.settings.auto_shim;
+                            default_config.settings.auto_update =
+                                partial_config.settings.auto_update;
                         }
-                        if !partial_config.settings.bin_dir.is_empty() {
-                            default_config.settings.bin_dir = partial_config.settings.bin_dir;
-                        }
-                        default_config.settings.auto_shim = partial_config.settings.auto_shim;
-                        default_config.settings.auto_update = partial_config.settings.auto_update;
+                        default_config
+                    } else {
+                        // Malformed JSON - fail with original error
+                        return Err(e).with_context(|| "Could not parse config file as JSON");
                     }
-                    default_config
-                } else {
-                    // Malformed JSON - fail with original error
-                    return Err(e).with_context(|| "Could not parse config file as JSON");
                 }
             }
         }
@@ -133,7 +139,39 @@ pub fn save_tool_configs_to_path(config: &ToolerConfig, path: &std::path::Path) 
     fs::create_dir_all(config_dir)?;
 
     let content = serde_json::to_string_pretty(config)?;
-    fs::write(path, content)?;
+    atomically_replace_with(path, |file| {
+        file.write_all(content.as_bytes())
+            .with_context(|| format!("Could not write temporary config for {}", path.display()))
+    })
+}
+
+fn atomically_replace_with(
+    path: &std::path::Path,
+    write_content: impl FnOnce(&mut File) -> Result<()>,
+) -> Result<()> {
+    let config_dir = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Invalid config path"))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(config_dir).with_context(|| {
+        format!(
+            "Could not create temporary config in {}",
+            config_dir.display()
+        )
+    })?;
+    write_content(temporary.as_file_mut())?;
+    temporary
+        .as_file_mut()
+        .sync_all()
+        .with_context(|| format!("Could not sync temporary config for {}", path.display()))?;
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("Could not atomically replace config at {}", path.display()))?;
+
+    #[cfg(unix)]
+    File::open(config_dir)
+        .and_then(|directory| directory.sync_all())
+        .with_context(|| format!("Could not sync config directory {}", config_dir.display()))?;
 
     Ok(())
 }
@@ -222,5 +260,21 @@ mod tests {
         } else {
             std::env::remove_var("TOOLER_BIN_DIR");
         }
+    }
+
+    #[test]
+    fn test_failed_temporary_write_preserves_existing_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir.path().join("config.json");
+        let original = b"{\"authoritative\":true}\n";
+        fs::write(&config_path, original).unwrap();
+
+        let result = atomically_replace_with(&config_path, |file| {
+            file.write_all(b"{\"partial\"")?;
+            Err(anyhow::anyhow!("injected write failure"))
+        });
+
+        assert!(result.is_err());
+        assert_eq!(fs::read(&config_path).unwrap(), original);
     }
 }
