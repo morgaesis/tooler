@@ -6,7 +6,7 @@ use crate::types::*;
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use walkdir::WalkDir;
 
@@ -441,6 +441,40 @@ pub async fn install_or_update_tool(
     Ok(executable_path)
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ReleaseBodyApproval {
+    Once,
+    Always,
+    Never,
+}
+
+fn prompt_release_body_approval<R: BufRead, W: Write>(
+    input: &mut R,
+    output: &mut W,
+) -> Result<ReleaseBodyApproval> {
+    loop {
+        write!(
+            output,
+            "Download this binary? [y]es once, [a]lways, [n]ever: "
+        )?;
+        output.flush()?;
+
+        let mut response = String::new();
+        if input.read_line(&mut response)? == 0 {
+            return Err(anyhow!(
+                "No response received; release body binary download rejected"
+            ));
+        }
+
+        match response.trim().to_ascii_lowercase().as_str() {
+            "y" | "yes" | "once" | "ask" => return Ok(ReleaseBodyApproval::Once),
+            "a" | "always" => return Ok(ReleaseBodyApproval::Always),
+            "n" | "no" | "never" => return Ok(ReleaseBodyApproval::Never),
+            _ => writeln!(output, "Invalid response. Enter y, a, or n.")?,
+        }
+    }
+}
+
 fn approve_release_body_asset(
     config: &mut ToolerConfig,
     repo: &str,
@@ -466,24 +500,24 @@ fn approve_release_body_asset(
                 repo, version
             );
             eprintln!("  {}", asset.download_url);
-            eprint!("Download this binary? [ask] once, [always], [never]: ");
-            io::stderr().flush()?;
+            let approval = {
+                let stdin = io::stdin();
+                let stderr = io::stderr();
+                prompt_release_body_approval(&mut stdin.lock(), &mut stderr.lock())?
+            };
 
-            let mut input = String::new();
-            io::stdin().read_line(&mut input)?;
-            match input.trim().to_ascii_lowercase().as_str() {
-                "ask" | "y" | "yes" => Ok(()),
-                "always" | "a" => {
+            match approval {
+                ReleaseBodyApproval::Once => Ok(()),
+                ReleaseBodyApproval::Always => {
                     config.settings.parse_release_body = ReleaseBodyPolicy::Always;
                     save_tool_configs(config)?;
                     Ok(())
                 }
-                "never" | "n" | "no" => {
+                ReleaseBodyApproval::Never => {
                     config.settings.parse_release_body = ReleaseBodyPolicy::Never;
                     save_tool_configs(config)?;
                     Err(anyhow!("Release body binary download rejected"))
                 }
-                _ => Err(anyhow!("Release body binary download rejected")),
             }
         }
     }
@@ -1189,6 +1223,60 @@ pub(crate) fn version_matches(requested: &str, existing: &str) -> bool {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[test]
+    fn release_body_prompt_accepts_every_displayed_choice() {
+        for response in ["y", "yes", "once", "a", "always", "n", "never"] {
+            let mut input = io::Cursor::new(format!("{response}\n"));
+            let mut output = Vec::new();
+
+            let approval = prompt_release_body_approval(&mut input, &mut output).unwrap();
+
+            let expected = match response {
+                "y" | "yes" | "once" => ReleaseBodyApproval::Once,
+                "a" | "always" => ReleaseBodyApproval::Always,
+                "n" | "never" => ReleaseBodyApproval::Never,
+                _ => unreachable!(),
+            };
+            assert_eq!(approval, expected);
+            assert_eq!(
+                String::from_utf8(output).unwrap(),
+                "Download this binary? [y]es once, [a]lways, [n]ever: "
+            );
+        }
+    }
+
+    #[test]
+    fn release_body_prompt_retries_an_invalid_response() {
+        let mut input = io::Cursor::new("wat\ny\n");
+        let mut output = Vec::new();
+
+        assert_eq!(
+            prompt_release_body_approval(&mut input, &mut output).unwrap(),
+            ReleaseBodyApproval::Once
+        );
+        assert_eq!(
+            String::from_utf8(output).unwrap(),
+            concat!(
+                "Download this binary? [y]es once, [a]lways, [n]ever: ",
+                "Invalid response. Enter y, a, or n.\n",
+                "Download this binary? [y]es once, [a]lways, [n]ever: "
+            )
+        );
+    }
+
+    #[test]
+    fn release_body_prompt_rejects_end_of_input() {
+        let mut input = io::Cursor::new("");
+        let mut output = Vec::new();
+
+        let error = prompt_release_body_approval(&mut input, &mut output).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "No response received; release body binary download rejected"
+        );
+    }
 
     #[test]
     fn test_version_matches() {
