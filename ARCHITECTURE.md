@@ -115,6 +115,10 @@ a unique sibling staging directory, and a target-specific mutex serializes
 replacement. Cleanup validates the operation's marker and removes only its
 known files without recursive deletion.
 
+Replacement compares the target with the operation's original image while
+holding the mutex. An operation whose target has changed is reported as
+superseded and cannot overwrite the newer image.
+
 If another process keeps the executable locked, the staged payload and
 pending status remain intact. A subsequent invocation reports the pending
 operation and schedules another bounded replacement attempt. Completion is
