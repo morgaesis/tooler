@@ -197,6 +197,13 @@ rm -rf "$TEMP_DIR"
 
 # Bootstrap: register tooler as a tool managed by itself for future self-updates
 export PATH="$INSTALL_DIR:$PATH"
+if [[ "$OS" == "windows" ]] && command -v cygpath &>/dev/null; then
+  export TOOLER_BIN_DIR="$(cygpath -w -- "$INSTALL_DIR")"
+elif [[ "$OS" == "windows" && "$INSTALL_DIR" == /[[:alpha:]]/* ]]; then
+  export TOOLER_BIN_DIR="${INSTALL_DIR:1:1}:${INSTALL_DIR:2}"
+else
+  export TOOLER_BIN_DIR="$INSTALL_DIR"
+fi
 if [[ "${TOOLER_NO_BOOTSTRAP:-}" == "1" || "${TOOLER_NO_BOOTSTRAP:-}" == "true" ]]; then
   echo "Skipping self-update registration."
 else

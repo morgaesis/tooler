@@ -167,7 +167,7 @@
 - ✅ Auto-shimming default enabled
 - ✅ Tooler-controlled shim directory (`~/.local/share/tooler/shims`)
 - ✅ `tooler config show` with format options
-- ✅ Auto-shim on `tooler pull`
+- ✅ Shell-compatible launchers on `tooler pull` and `tooler run`: Bash on Unix, Bash and native batch companions on Windows
 - ✅ Enhanced `tooler list` with colors, age, architecture, stale status
 - ✅ Fixed version display 'v' prefix bug
 - ✅ Log level via `LOG_LEVEL` and `TOOLER_LOG_LEVEL`

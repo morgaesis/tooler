@@ -100,9 +100,7 @@ jobs:
 
       - name: Verify Windows shell launchers
         if: runner.os == 'Windows'
-        env:
-          TOOLER_TEST_BASH: C:\Program Files\Git\bin\bash.exe
-        run: cargo test --test integration_tests test_auto_shim_creation -- --nocapture
+        run: cargo test -- --nocapture
 
       - name: Install local tooler (Unix)
         if: runner.os != 'Windows'

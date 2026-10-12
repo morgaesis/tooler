@@ -99,14 +99,18 @@ Tools installed via direct URL are treated as "direct" author tools. They are st
 
 ## Self-Update Mechanism
 
-When `tooler update` or `tooler pull` targets tooler itself (`morgaesis/tooler`), `handle_self_update` replaces the running binary in-place:
+`tooler update` and `tooler pull` recognize `morgaesis/tooler` as a
+self-update. Installing the running package version leaves the executable
+unchanged. The replacement target is `std::env::current_exe()`.
 
-1. Detect self-update by checking if `tool_name == "tooler"` and `author == "morgaesis"`.
-2. Locate the current executable via `std::env::current_exe()`.
-3. Copy the newly downloaded binary to a `.new` temporary path alongside the current executable.
-4. Set executable permissions (0o755) on the temporary file.
-5. Atomically rename the temporary file over the current executable. The old inode remains alive until the current process exits, so the rename is safe on Unix.
-6. Print a message instructing the user to restart.
+Unix copies the downloaded binary to a temporary sibling, sets executable
+permissions, and atomically renames it over the running executable. The
+running process retains its original inode until it exits.
+
+Windows schedules replacement through a helper because a running executable
+cannot be overwritten. Scheduling does not establish that replacement has
+completed. The helper waits for the updating process to exit and replaces
+the executable through the Windows file-replacement API.
 
 ## Shimming & Symlink Creation
 

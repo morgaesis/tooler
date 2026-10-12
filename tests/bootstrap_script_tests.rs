@@ -53,14 +53,18 @@ curl() {
   printf 'offline archive\n' > "$3"
 }
 extract_fixture() {
-  printf '%s\n' '#!/bin/bash' 'printf "%s\n" "$@" >> "$FIXTURE_ROOT/bootstrap"' > "$FIXTURE_BINARY"
+  printf '%s\n' '#!/bin/bash' 'printf "%s\n" "$@" >> "$FIXTURE_ROOT/bootstrap"' 'printf "%s\n" "$TOOLER_BIN_DIR" > "$FIXTURE_ROOT/bootstrap-bin-dir"' > "$FIXTURE_BINARY"
 }
 unzip() { [[ $# == 2 && "$1" == -q && "$2" == *.zip ]]; extract_fixture; }
 tar() { [[ $# == 2 && "$1" == -xzf && "$2" == *.tar.gz ]]; extract_fixture; }
 if [[ "$FIXTURE_MODE" == native ]]; then
   cygpath() {
-    [[ $# == 3 && "$1" == -u && "$2" == -- ]]
-    [[ "$3" == "$LOCALAPPDATA/tooler/bin" ]]
+    [[ $# == 3 && "$2" == -- ]]
+    if [[ "$1" == -u ]]; then
+      [[ "$3" == "$LOCALAPPDATA/tooler/bin" ]]
+    else
+      [[ "$1" == -w && "$3" == "$expected" ]]
+    fi
     printf 'cygpath\n' >> "$FIXTURE_ROOT/calls"
     printf '%s\n' "$expected"
   }
@@ -72,6 +76,7 @@ elif [[ "$FIXTURE_MODE" == native-fallback ]]; then
 fi
 source "$2"
 [[ -x "$expected/$FIXTURE_BINARY" ]]
+[[ "$(< "$FIXTURE_ROOT/bootstrap-bin-dir")" -ef "$expected" ]]
 for installed in "$expected"/*; do
   [[ "${installed##*/}" == "$FIXTURE_BINARY" ]]
 done
