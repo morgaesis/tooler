@@ -171,6 +171,19 @@ echo "Installing tooler to $INSTALL_DIR..."
 # Move new binary into place
 mv "$BINARY_NAME" "$INSTALL_PATH"
 chmod +x "$INSTALL_PATH"
+if [[ "$OS" == "windows" ]]; then
+  # Preserve a legacy native manager without shadowing the current .exe.
+  # Leave extensionless shell wrappers untouched.
+  # MSYS file tests can resolve "tooler" to "tooler.exe". Enumerate the
+  # actual directory entry so a fresh installation cannot archive itself.
+  for LEGACY_PATH in "$INSTALL_DIR"/tooler*; do
+    if [[ "${LEGACY_PATH##*/}" == tooler && -f "$LEGACY_PATH" && "$(head -c 2 "$LEGACY_PATH")" == MZ ]]; then
+      LEGACY_BACKUP=$(mktemp "$INSTALL_DIR/.tooler-legacy-XXXXXX")
+      mv "$LEGACY_PATH" "$LEGACY_BACKUP"
+      echo "Preserved the extensionless executable at $LEGACY_BACKUP"
+    fi
+  done
+fi
 
 # Update PATH in shell RC files
 echo "Updating PATH in shell configuration..."

@@ -35,6 +35,10 @@ if [[ "$FIXTURE_MODE" == native* ]]; then
     export LOCALAPPDATA="${LOCALAPPDATA//\//\\}"
   fi
 fi
+if [[ "$FIXTURE_BINARY" == tooler.exe && "$FIXTURE_MODE" != missing && "$FIXTURE_MODE" != fresh ]]; then
+  mkdir -p "$expected"
+  printf 'MZlegacy manager fixture\n' > "$expected/tooler"
+fi
 uname() {
   case "$1" in
   -s) printf '%s\n' "$FIXTURE_OS" ;;
@@ -53,7 +57,11 @@ curl() {
   printf 'offline archive\n' > "$3"
 }
 extract_fixture() {
-  printf '%s\n' '#!/bin/bash' 'printf "%s\n" "$@" >> "$FIXTURE_ROOT/bootstrap"' 'printf "%s\n" "$TOOLER_BIN_DIR" > "$FIXTURE_ROOT/bootstrap-bin-dir"' > "$FIXTURE_BINARY"
+  if [[ -n "${FIXTURE_STUB:-}" ]]; then
+    cp -- "$FIXTURE_STUB" "$FIXTURE_BINARY"
+  else
+    printf '%s\n' '#!/bin/bash' 'printf "%s\n" "$@" >> "$FIXTURE_ROOT/bootstrap"' 'printf "%s\n" "$TOOLER_BIN_DIR" > "$FIXTURE_ROOT/bootstrap-bin-dir"' > "$FIXTURE_BINARY"
+  fi
 }
 unzip() { [[ $# == 2 && "$1" == -q && "$2" == *.zip ]]; extract_fixture; }
 tar() { [[ $# == 2 && "$1" == -xzf && "$2" == *.tar.gz ]]; extract_fixture; }
@@ -76,10 +84,28 @@ elif [[ "$FIXTURE_MODE" == native-fallback ]]; then
 fi
 source "$2"
 [[ -x "$expected/$FIXTURE_BINARY" ]]
-[[ "$(< "$FIXTURE_ROOT/bootstrap-bin-dir")" -ef "$expected" ]]
+bootstrap_bin_dir="$(< "$FIXTURE_ROOT/bootstrap-bin-dir")"
+bootstrap_bin_dir="${bootstrap_bin_dir//\\//}"
+if [[ "$bootstrap_bin_dir" == [[:alpha:]]:/* ]]; then
+  drive="${bootstrap_bin_dir:0:1}"
+  bootstrap_bin_dir="/${drive,,}/${bootstrap_bin_dir:3}"
+fi
+[[ "$bootstrap_bin_dir" -ef "$expected" ]] || {
+  printf 'Bootstrap directory mismatch: %s != %s\n' "$bootstrap_bin_dir" "$expected" >&2
+  exit 1
+}
 for installed in "$expected"/*; do
-  [[ "${installed##*/}" == "$FIXTURE_BINARY" ]]
+  if [[ "$FIXTURE_BINARY" == tooler.exe ]]; then
+    [[ "${installed##*/}" == tooler.exe || "${installed##*/}" == .tooler-legacy-* ]]
+  else
+    [[ "${installed##*/}" == "$FIXTURE_BINARY" ]]
+  fi
 done
+if [[ "$FIXTURE_BINARY" == tooler.exe && "$FIXTURE_MODE" != fresh ]]; then
+  legacy_copies=("$expected"/.tooler-legacy-*)
+  [[ ${#legacy_copies[@]} == 1 ]]
+  [[ "$(< "${legacy_copies[0]}")" == 'MZlegacy manager fixture' ]]
+fi
 # Source both RC files to verify that metacharacters stay literal and PATH is retained.
 for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
   PATH=/fixture/original
@@ -89,14 +115,55 @@ for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
 done
 "#;
 
+fn native_fixture_binary() -> Option<(TempDir, std::path::PathBuf)> {
+    #[cfg(windows)]
+    {
+        let root = TempDir::new().unwrap();
+        let source = root.path().join("fixture.rs");
+        let binary = root.path().join("fixture-manager.exe");
+        // Windows fixtures use a native executable, not a text file named .exe.
+        fs::write(
+            &source,
+            r#"use std::{env, fs, io::Write, path::PathBuf};
+fn main() {
+    let root = PathBuf::from(env::var_os("FIXTURE_ROOT_NATIVE").unwrap());
+    let mut calls = fs::OpenOptions::new().create(true).append(true)
+        .open(root.join("bootstrap")).unwrap();
+    for arg in env::args().skip(1) { writeln!(calls, "{arg}").unwrap(); }
+    fs::write(root.join("bootstrap-bin-dir"), env::var("TOOLER_BIN_DIR").unwrap()).unwrap();
+}
+"#,
+        )
+        .unwrap();
+        let output = Command::new("rustc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .expect("Rust compiler is required for the native bootstrap fixture");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(binary.is_file());
+        assert_eq!(&fs::read(&binary).unwrap()[..2], b"MZ");
+        Some((root, binary))
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 fn run_fixture(
     os: &str,
     arch: &str,
-    native_arch: &str,
-    emulated_native_arch: &str,
+    architecture_environment: (&str, &str),
     mode: &str,
     target: &str,
     latest: bool,
+    native_fixture: &Option<(TempDir, std::path::PathBuf)>,
 ) {
     let root = TempDir::new().unwrap();
     let windows = os != "Linux" && os != "Darwin";
@@ -117,10 +184,18 @@ fn run_fixture(
         .arg(script)
         .env("FIXTURE_OS", os)
         .env("FIXTURE_ARCH", arch)
-        .env("FIXTURE_NATIVE_ARCH", native_arch)
-        .env("FIXTURE_EMULATED_NATIVE_ARCH", emulated_native_arch)
+        .env("FIXTURE_NATIVE_ARCH", architecture_environment.0)
+        .env("FIXTURE_EMULATED_NATIVE_ARCH", architecture_environment.1)
         .env("FIXTURE_MODE", mode)
         .env("FIXTURE_BINARY", binary)
+        .env("FIXTURE_ROOT_NATIVE", root.path())
+        .env(
+            "FIXTURE_STUB",
+            native_fixture
+                .as_ref()
+                .map(|(_, path)| path.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default(),
+        )
         .env("TOOLER_VERSION", if latest { "" } else { "v0.7.9" })
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -167,6 +242,7 @@ fn run_fixture(
 
 #[test]
 fn windows_platform_and_native_architecture() {
+    let native_fixture = native_fixture_binary();
     for os in ["MINGW64_NT-10.0", "MSYS_NT-10.0", "CYGWIN_NT-10.0"] {
         for (native, emulated, target) in [
             ("AMD64", "ARM64", "aarch64-pc-windows-msvc"),
@@ -174,43 +250,54 @@ fn windows_platform_and_native_architecture() {
             ("AMD64", "", "x86_64-pc-windows-msvc"),
             ("", "", "x86_64-pc-windows-msvc"),
         ] {
-            run_fixture(os, "x86_64", native, emulated, "native", target, false);
+            run_fixture(
+                os,
+                "x86_64",
+                (native, emulated),
+                "native",
+                target,
+                false,
+                &native_fixture,
+            );
         }
     }
     run_fixture(
         "MINGW64_NT-10.0",
         "aarch64",
-        "",
-        "",
+        ("", ""),
         "native",
         "aarch64-pc-windows-msvc",
         false,
+        &native_fixture,
     );
 }
 
 #[test]
 fn windows_paths_and_latest_release() {
+    let native_fixture = native_fixture_binary();
     for mode in [
         "native-fallback",
         "override",
         "relative",
         "profile",
         "missing",
+        "fresh",
     ] {
         run_fixture(
             "MINGW64_NT-10.0",
             "x86_64",
-            "AMD64",
-            "ARM64",
+            ("AMD64", "ARM64"),
             mode,
             "aarch64-pc-windows-msvc",
             mode == "override",
+            &native_fixture,
         );
     }
 }
 
 #[test]
 fn unix_assets_and_installation_paths() {
+    let native_fixture = native_fixture_binary();
     for (os, arch, target) in [
         ("Linux", "x86_64", "x86_64-unknown-linux-gnu"),
         ("Linux", "aarch64", "aarch64-unknown-linux-gnu"),
@@ -219,7 +306,15 @@ fn unix_assets_and_installation_paths() {
         ("Darwin", "arm64", "aarch64-apple-darwin"),
     ] {
         for mode in ["unix", "override", "relative"] {
-            run_fixture(os, arch, "AMD64", "ARM64", mode, target, false);
+            run_fixture(
+                os,
+                arch,
+                ("AMD64", "ARM64"),
+                mode,
+                target,
+                false,
+                &native_fixture,
+            );
         }
     }
 }
