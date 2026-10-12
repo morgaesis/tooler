@@ -27,9 +27,36 @@ esac
 
 if [[ "$OS" == "windows" ]]; then
   NATIVE_ARCH=$(printf '%s' "${PROCESSOR_ARCHITEW6432:-${PROCESSOR_ARCHITECTURE:-}}" | tr '[:upper:]' '[:lower:]')
+  # Environment and .NET Framework architecture can describe an emulated shell.
+  # IsWow64Process2 identifies the native host even from x64 PowerShell on ARM64.
+  if command -v powershell >/dev/null 2>&1; then
+    API_ARCH=$(
+      powershell -NoLogo -NoProfile -NonInteractive -Command - 2>/dev/null <<'PS'
+$ErrorActionPreference = 'Stop'
+Add-Type 'using System; using System.Runtime.InteropServices; public static class ToolerNativeArchitecture { [DllImport("kernel32.dll", SetLastError=true)] private static extern bool IsWow64Process2(IntPtr process, out ushort processMachine, out ushort nativeMachine); public static string Detect() { ushort p, n; try { if (!IsWow64Process2(new IntPtr(-1), out p, out n)) return "failed"; } catch (EntryPointNotFoundException) { return "unavailable"; } switch (n) { case 0xAA64: return "arm64"; case 0x8664: return "amd64"; case 0x014c: return "x86"; default: return "unsupported"; } } }'
+[ToolerNativeArchitecture]::Detect()
+PS
+    ) || API_ARCH=""
+    API_ARCH=$(printf '%s' "$API_ARCH" | tr -d '\r\n')
+    case $API_ARCH in
+    arm64 | amd64 | x86) NATIVE_ARCH="$API_ARCH" ;;
+    unsupported | failed | "")
+      echo "Unable to determine a supported native Windows architecture ($API_ARCH)." >&2
+      exit 1
+      ;;
+    unavailable) echo "Native Windows architecture query unavailable; using shell architecture hints." >&2 ;;
+    *)
+      echo "Unexpected native Windows architecture query result." >&2
+      exit 1
+      ;;
+    esac
+  else
+    echo "PowerShell unavailable; using shell architecture hints." >&2
+  fi
   case $NATIVE_ARCH in
   amd64 | x86_64) ARCH="amd64" ;;
   aarch64 | arm64) ARCH="arm64" ;;
+  x86) ARCH="x86" ;;
   esac
 fi
 

@@ -46,6 +46,12 @@ uname() {
   *) return 1 ;;
   esac
 }
+powershell() {
+  # Never query the test host when simulating another Windows architecture.
+  while IFS= read -r ignored; do :; done
+  [[ "$FIXTURE_API_ARCH" != launch-failed ]] || return 1
+  printf '%s\r\n' "${FIXTURE_API_ARCH:-unavailable}"
+}
 gh() {
   [[ "$*" == "api repos/morgaesis/tooler/releases/latest --jq .tag_name" ]]
   printf 'gh\n' >> "$FIXTURE_ROOT/calls"
@@ -159,7 +165,7 @@ fn main() {
 fn run_fixture(
     os: &str,
     arch: &str,
-    architecture_environment: (&str, &str),
+    architecture_environment: (&str, &str, &str),
     mode: &str,
     target: &str,
     latest: bool,
@@ -186,6 +192,7 @@ fn run_fixture(
         .env("FIXTURE_ARCH", arch)
         .env("FIXTURE_NATIVE_ARCH", architecture_environment.0)
         .env("FIXTURE_EMULATED_NATIVE_ARCH", architecture_environment.1)
+        .env("FIXTURE_API_ARCH", architecture_environment.2)
         .env("FIXTURE_MODE", mode)
         .env("FIXTURE_BINARY", binary)
         .env("FIXTURE_ROOT_NATIVE", root.path())
@@ -211,6 +218,15 @@ fn run_fixture(
     let output = child.wait_with_output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
+    if matches!(
+        architecture_environment.2,
+        "failed" | "unsupported" | "launch-failed"
+    ) {
+        assert!(!output.status.success());
+        assert!(stderr.contains("Unable to determine a supported native Windows architecture"));
+        assert!(!root.path().join("asset").exists());
+        return;
+    }
     if mode == "missing" {
         assert!(!output.status.success());
         assert!(stdout.contains("Set LOCALAPPDATA, USERPROFILE, or TOOLER_BIN_DIR"));
@@ -244,16 +260,22 @@ fn run_fixture(
 fn windows_platform_and_native_architecture() {
     let native_fixture = native_fixture_binary();
     for os in ["MINGW64_NT-10.0", "MSYS_NT-10.0", "CYGWIN_NT-10.0"] {
-        for (native, emulated, target) in [
-            ("AMD64", "ARM64", "aarch64-pc-windows-msvc"),
-            ("ARM64", "", "aarch64-pc-windows-msvc"),
-            ("AMD64", "", "x86_64-pc-windows-msvc"),
-            ("", "", "x86_64-pc-windows-msvc"),
+        for (native, emulated, api, target) in [
+            ("AMD64", "ARM64", "", "aarch64-pc-windows-msvc"),
+            ("ARM64", "", "", "aarch64-pc-windows-msvc"),
+            ("AMD64", "", "", "x86_64-pc-windows-msvc"),
+            ("", "", "", "x86_64-pc-windows-msvc"),
+            ("AMD64", "", "arm64", "aarch64-pc-windows-msvc"),
+            ("ARM64", "", "amd64", "x86_64-pc-windows-msvc"),
+            ("AMD64", "", "failed", ""),
+            ("AMD64", "", "unsupported", ""),
+            ("AMD64", "", "launch-failed", ""),
+            ("ARM64", "", "unavailable", "aarch64-pc-windows-msvc"),
         ] {
             run_fixture(
                 os,
                 "x86_64",
-                (native, emulated),
+                (native, emulated, api),
                 "native",
                 target,
                 false,
@@ -264,7 +286,7 @@ fn windows_platform_and_native_architecture() {
     run_fixture(
         "MINGW64_NT-10.0",
         "aarch64",
-        ("", ""),
+        ("", "", ""),
         "native",
         "aarch64-pc-windows-msvc",
         false,
@@ -286,7 +308,7 @@ fn windows_paths_and_latest_release() {
         run_fixture(
             "MINGW64_NT-10.0",
             "x86_64",
-            ("AMD64", "ARM64"),
+            ("AMD64", "ARM64", ""),
             mode,
             "aarch64-pc-windows-msvc",
             mode == "override",
@@ -309,7 +331,7 @@ fn unix_assets_and_installation_paths() {
             run_fixture(
                 os,
                 arch,
-                ("AMD64", "ARM64"),
+                ("AMD64", "ARM64", "arm64"),
                 mode,
                 target,
                 false,
@@ -317,4 +339,81 @@ fn unix_assets_and_installation_paths() {
             );
         }
     }
+}
+
+#[cfg(windows)]
+#[test]
+fn powershell_native_architecture_selection() {
+    let root = TempDir::new().unwrap();
+    let installer =
+        fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("install.ps1"))
+            .unwrap();
+    // Exercise the real selection block without downloads or configuration writes.
+    let (detection, _) = installer
+        .split_once("\nif ($ToolerVersion) {\n    $tag = $ToolerVersion")
+        .expect("PowerShell installer architecture block must precede release resolution");
+    for (machine, expected) in [
+        ("X64", Some("x86_64")),
+        ("Arm64", Some("aarch64")),
+        ("Unknown", None),
+    ] {
+        let script = format!("& {{ {detection}\nWrite-Output ('architecture=' + $arch) }}",);
+        let fixture = format!(
+            "Add-Type 'public static class ToolerNativeArchitecture {{ public static string Detect() {{ return \"{machine}\"; }} }}'; {script}"
+        );
+        let output = Command::new("powershell")
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &fixture,
+            ])
+            .env_clear()
+            .env("PATH", std::env::var_os("PATH").unwrap())
+            .env("SystemRoot", std::env::var_os("SystemRoot").unwrap())
+            .env("TEMP", root.path())
+            .env("TMP", root.path())
+            .output()
+            .expect("Windows PowerShell is required for installer architecture tests");
+        if let Some(expected) = expected {
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line == format!("architecture={expected}")));
+        } else {
+            assert!(!output.status.success());
+            assert!(String::from_utf8_lossy(&output.stderr)
+                .contains("No pre-built Windows binary is available"));
+        }
+    }
+    // Compile and call the real native query as well, not only the mapping fixture.
+    let script = format!("& {{ {detection}\nWrite-Output ('architecture=' + $arch) }}");
+    let output = Command::new("powershell")
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &script,
+        ])
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .env("SystemRoot", std::env::var_os("SystemRoot").unwrap())
+        .env("TEMP", root.path())
+        .env("TMP", root.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| matches!(line, "architecture=aarch64" | "architecture=x86_64")));
 }

@@ -151,6 +151,8 @@ The Git Bash installer preserves an existing extensionless native executable
 under a unique `.tooler-legacy-*` backup name, so it cannot shadow `tooler.exe`.
 Native launchers use `tooler.exe` in the same directory, or `tooler` on PATH
 when the shim directory is configured separately.
+Both Windows installers query the native host architecture, so x64 shell
+emulation on ARM64 selects the ARM64 package.
 
 For a manually configured Git Bash installation, add the native directory:
 

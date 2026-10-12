@@ -20,7 +20,36 @@ if ($ToolerVersion) {
     Write-Host "Installing tooler (latest)..."
 }
 
-$arch = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture) {
+if (-not ('ToolerNativeArchitecture' -as [type])) {
+    Add-Type @'
+using System;
+using System.Runtime.InteropServices;
+public static class ToolerNativeArchitecture {
+    [DllImport("kernel32.dll", SetLastError=true)]
+    private static extern bool IsWow64Process2(IntPtr process, out ushort processMachine, out ushort nativeMachine);
+    public static string Detect() {
+        ushort processMachine, nativeMachine;
+        try {
+            if (!IsWow64Process2(new IntPtr(-1), out processMachine, out nativeMachine))
+                throw new System.ComponentModel.Win32Exception();
+        } catch (EntryPointNotFoundException) {
+            return "Unavailable";
+        }
+        switch (nativeMachine) {
+            case 0x8664: return "X64";
+            case 0xAA64: return "Arm64";
+            default: throw new NotSupportedException("Unsupported native Windows architecture");
+        }
+    }
+}
+'@
+}
+$nativeArchitecture = [ToolerNativeArchitecture]::Detect()
+if ($nativeArchitecture -eq "Unavailable") {
+    Write-Warning "Native Windows architecture query unavailable; using runtime architecture hints."
+    $nativeArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+}
+$arch = switch ($nativeArchitecture) {
     "X64" { "x86_64" }
     "Arm64" { "aarch64" }
     default { throw "No pre-built Windows binary is available for architecture '$($_)'." }
