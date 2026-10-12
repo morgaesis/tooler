@@ -46,9 +46,9 @@ Tools are stored in the user's data directory (typically `~/.local/share/tooler/
 
 On Windows, native host architecture takes precedence over the executable's
 compile target. Tooler resolves `IsWow64Process2` at runtime and uses its native
-machine result. If the API is unavailable or fails, a trace diagnostic identifies
-the compile-target fallback. Unknown native machines do not match a supported
-architecture. Recovery also accepts existing x64 installations on Windows ARM64.
+machine result. An unavailable API emits a warning and uses the compile-target
+fallback. A failed query or unknown native machine prevents automatic asset
+selection. Recovery also accepts existing x64 installations on Windows ARM64.
 The installers query native architecture before downloading; compatibility
 fallbacks emit a warning when the native query is unavailable.
 
