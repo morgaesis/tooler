@@ -1292,6 +1292,7 @@ struct SelfUpdateMarker {
     target: PathBuf,
     payload: String,
     runner: String,
+    expected_image: String,
 }
 
 #[cfg(windows)]
@@ -1300,7 +1301,9 @@ fn write_self_update_marker(directory: &Path, target: &Path) -> Result<()> {
         target: fs::canonicalize(target)?,
         payload: "payload.exe".into(),
         runner: "runner.exe".into(),
+        expected_image: "expected.exe".into(),
     };
+    fs::copy(target, directory.join("expected.exe"))?;
     fs::write(directory.join("owner.json"), serde_json::to_vec(&marker)?)?;
     fs::write(directory.join("status"), b"pending")?;
     Ok(())
@@ -1340,9 +1343,15 @@ fn validate_self_update_directory(directory: &Path, target: &Path) -> Result<Pat
     }
     for entry in fs::read_dir(&directory)? {
         let entry = entry?;
-        if !["owner.json", "status", "payload.exe", "runner.exe"]
-            .iter()
-            .any(|name| entry.file_name() == *name)
+        if ![
+            "owner.json",
+            "status",
+            "payload.exe",
+            "runner.exe",
+            "expected.exe",
+        ]
+        .iter()
+        .any(|name| entry.file_name() == *name)
         {
             return Err(anyhow!("Self-update directory contains an unknown file"));
         }
@@ -1350,11 +1359,16 @@ fn validate_self_update_directory(directory: &Path, target: &Path) -> Result<Pat
     }
     let marker: SelfUpdateMarker =
         serde_json::from_slice(&fs::read(directory.join("owner.json"))?)?;
-    if marker.target != target || marker.payload != "payload.exe" || marker.runner != "runner.exe" {
+    if marker.target != target
+        || marker.payload != "payload.exe"
+        || marker.runner != "runner.exe"
+        || marker.expected_image != "expected.exe"
+    {
         return Err(anyhow!(
             "Self-update marker does not bind this target and owned files"
         ));
     }
+    reject_self_update_reparse_point(&directory.join("expected.exe"), false)?;
     Ok(directory)
 }
 
@@ -1443,7 +1457,7 @@ fn run_owned_self_update(directory: &Path, target: &Path, parent_id: u32) -> Res
     attempt_owned_self_update(&directory, target)?;
     use std::os::windows::process::CommandExt;
     use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
-    // The replaced target performs cleanup after this runner exits.
+    // The current target cleans completed or superseded operations after this runner exits.
     Command::new(target)
         .arg("__self-cleanup")
         .arg(&directory)
@@ -1455,14 +1469,22 @@ fn run_owned_self_update(directory: &Path, target: &Path, parent_id: u32) -> Res
         .stderr(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
-        .context("Replacement completed, but owned directory cleanup could not start")?;
+        .context("Self-update finished, but owned directory cleanup could not start")?;
     Ok(())
 }
 
 #[cfg(windows)]
 fn attempt_owned_self_update(directory: &Path, target: &Path) -> Result<()> {
+    let _mutex = SelfUpdateMutex::acquire(target)?;
     let directory = validate_self_update_directory(directory, target)?;
-    if fs::read(directory.join("status"))? == b"completed" {
+    if matches!(
+        fs::read(directory.join("status"))?.as_slice(),
+        b"completed" | b"superseded"
+    ) {
+        return Ok(());
+    }
+    // This comparison and replacement share the target mutex, including retries.
+    if supersede_changed_self_update(&directory, target)? {
         return Ok(());
     }
     let result = complete_pending_self_update(&directory.join("payload.exe"), target);
@@ -1473,20 +1495,49 @@ fn attempt_owned_self_update(directory: &Path, target: &Path) -> Result<()> {
     result
 }
 
+// Call only while holding the target mutex.
+#[cfg(windows)]
+fn supersede_changed_self_update(directory: &Path, target: &Path) -> Result<bool> {
+    if fs::read(target)? != fs::read(directory.join("expected.exe"))? {
+        fs::write(directory.join("status"), b"superseded")?;
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 #[cfg(windows)]
 fn cleanup_owned_self_update(directory: &Path, target: &Path, current_exe: &Path) -> Result<()> {
     let _mutex = SelfUpdateMutex::acquire(target)?;
     let directory = validate_self_update_directory(directory, target)?;
-    if fs::canonicalize(current_exe)? != fs::canonicalize(target)?
-        || fs::read(directory.join("status"))? != b"completed"
-        || directory.join("payload.exe").exists()
-    {
+    if fs::canonicalize(current_exe)? != fs::canonicalize(target)? {
         return Err(anyhow!(
-            "Self-update cleanup requires the completed target image"
+            "Self-update cleanup requires the current target image"
         ));
     }
+    let status = fs::read(directory.join("status"))?;
+    let files: &[&str] = match status.as_slice() {
+        b"completed" if !directory.join("payload.exe").exists() => {
+            &["runner.exe", "expected.exe", "status", "owner.json"]
+        }
+        b"superseded" if fs::read(target)? != fs::read(directory.join("expected.exe"))? => &[
+            "payload.exe",
+            "runner.exe",
+            "expected.exe",
+            "status",
+            "owner.json",
+        ],
+        _ => {
+            return Err(anyhow!(
+                "Self-update cleanup requires a terminal owned operation"
+            ))
+        }
+    };
+    // Check every owned file before deleting anything, including a superseded payload.
+    for name in files {
+        reject_self_update_reparse_point(&directory.join(name), false)?;
+    }
     // No recursive deletion: an unexpected child makes remove_dir fail safely.
-    for name in ["runner.exe", "status", "owner.json"] {
+    for name in files {
         let path = directory.join(name);
         reject_self_update_reparse_point(&path, false)?;
         fs::remove_file(path)?;
@@ -1516,11 +1567,25 @@ fn report_pending_self_updates(target: &Path) -> Result<()> {
             continue;
         }
         // Another helper can finish cleanup between enumeration and this read.
-        let Ok(status) = fs::read_to_string(directory.join("status")) else {
+        let Ok(mut status) = fs::read_to_string(directory.join("status")) else {
             continue;
         };
-        if status == "completed" {
-            eprintln!("Tooler self-update completed.");
+        if status != "completed" && status != "superseded" {
+            let _mutex = SelfUpdateMutex::acquire(&target)?;
+            // Revalidate after acquiring the mutex: another helper may have finished.
+            if validate_self_update_directory(&directory, &target).is_err() {
+                continue;
+            }
+            status = fs::read_to_string(directory.join("status"))?;
+            if status != "completed"
+                && status != "superseded"
+                && supersede_changed_self_update(&directory, &target)?
+            {
+                status = "superseded".into();
+            }
+        }
+        if status == "completed" || status == "superseded" {
+            eprintln!("Tooler self-update {status}.");
             if let Err(error) = cleanup_owned_self_update(&directory, &target, &env::current_exe()?)
             {
                 eprintln!("Owned self-update cleanup deferred: {error:#}");
@@ -1849,6 +1914,101 @@ mod self_update_tests {
         );
         cleanup_owned_self_update(stage.path(), &target, &target).unwrap();
         assert!(!stage.path().exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn queued_original_image_cannot_overwrite_a_later_success() {
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("tooler.exe");
+        fs::write(&target, b"original").unwrap();
+        let older = owned_stage(parent.path(), &target, b"older");
+        let newer = owned_stage(parent.path(), &target, b"newer");
+        let guard = SelfUpdateMutex::acquire(&target).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let queued = scope.spawn(|| {
+                sender.send(()).unwrap();
+                attempt_owned_self_update(older.path(), &target).unwrap();
+            });
+            receiver.recv().unwrap();
+            attempt_owned_self_update(newer.path(), &target).unwrap();
+            assert_eq!(fs::read(newer.path().join("status")).unwrap(), b"completed");
+            drop(guard);
+            queued.join().unwrap();
+        });
+        assert_eq!(fs::read(&target).unwrap(), b"newer");
+        assert_eq!(
+            fs::read(older.path().join("status")).unwrap(),
+            b"superseded"
+        );
+        assert_eq!(
+            fs::read(older.path().join("payload.exe")).unwrap(),
+            b"older"
+        );
+        // A second attempt cannot turn a superseded operation into completed.
+        attempt_owned_self_update(older.path(), &target).unwrap();
+        assert_eq!(
+            fs::read(older.path().join("status")).unwrap(),
+            b"superseded"
+        );
+        fs::write(older.path().join("foreign"), b"keep").unwrap();
+        assert!(cleanup_owned_self_update(older.path(), &target, &target).is_err());
+        assert_eq!(
+            fs::read(older.path().join("payload.exe")).unwrap(),
+            b"older"
+        );
+        assert_eq!(fs::read(older.path().join("foreign")).unwrap(), b"keep");
+        fs::remove_file(older.path().join("foreign")).unwrap();
+        assert!(
+            cleanup_owned_self_update(older.path(), &target, &env::current_exe().unwrap()).is_err()
+        );
+        cleanup_owned_self_update(older.path(), &target, &target).unwrap();
+        assert!(!older.path().exists());
+        assert!(newer.path().join("runner.exe").exists());
+        assert_eq!(fs::read(&target).unwrap(), b"newer");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ordinary_invocation_reports_superseded_without_retry_or_completion() {
+        let parent = tempfile::tempdir().unwrap();
+        let product = env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("tooler.exe");
+        let target = parent.path().join("tooler.exe");
+        fs::copy(&product, &target).unwrap();
+        let older = owned_stage(parent.path(), &target, b"obsolete payload");
+        let mut installed = fs::read(&target).unwrap();
+        installed.extend_from_slice(b"later-success");
+        let newer = owned_stage(parent.path(), &target, &installed);
+        attempt_owned_self_update(newer.path(), &target).unwrap();
+        cleanup_owned_self_update(newer.path(), &target, &target).unwrap();
+        let report = Command::new(&target)
+            .arg("version")
+            .env("TOOLER_CONFIG", parent.path().join("config.json"))
+            .env("TOOLER_DATA_DIR", parent.path().join("data"))
+            .env("TOOLER_BIN_DIR", parent.path().join("bin"))
+            .env("TOOLER_STATE_DIR", parent.path().join("state"))
+            .env("HOME", parent.path())
+            .env_remove("TOOLER_LOG_FILE")
+            .output()
+            .unwrap();
+        assert!(report.status.success());
+        let stderr = String::from_utf8(report.stderr).unwrap();
+        assert!(
+            stderr.contains("Tooler self-update superseded."),
+            "{stderr}"
+        );
+        assert!(!stderr.contains("completed"), "{stderr}");
+        assert!(!stderr.contains("retry scheduled"), "{stderr}");
+        assert!(!stderr.contains("remains pending"), "{stderr}");
+        assert!(!older.path().exists());
+        assert_eq!(fs::read(&target).unwrap(), installed);
     }
 
     #[cfg(windows)]
