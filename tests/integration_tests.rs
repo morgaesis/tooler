@@ -405,6 +405,8 @@ fn shim_shell_command(ctx: &TestContext, shell: &std::path::Path, args: &[String
         .env("TOOLER_DATA_DIR", ctx._temp_dir.path().join("data"))
         .env("TOOLER_BIN_DIR", &ctx.bin_dir)
         .env("TOOLER_STATE_DIR", ctx._temp_dir.path().join("state"))
+        .env_remove("TOOLER_LOG_FILE")
+        .env("TOOLER_SHIM_LOG", ctx._temp_dir.path().join("shim.log"))
         .env("HOME", ctx._temp_dir.path());
     if shell.file_name().is_some_and(|name| name == "cmd.exe") {
         use std::os::windows::process::CommandExt;

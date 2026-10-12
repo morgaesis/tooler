@@ -1962,7 +1962,10 @@ mod self_update_tests {
                 .arg("version")
                 .env("TOOLER_CONFIG", &config)
                 .env("TOOLER_DATA_DIR", &data)
-                .env("TOOLER_BIN_DIR", &bin);
+                .env("TOOLER_BIN_DIR", &bin)
+                .env("TOOLER_STATE_DIR", parent.path().join("state"))
+                .env("HOME", parent.path())
+                .env_remove("TOOLER_LOG_FILE");
             command
         };
         // A normal invocation must never touch similarly named unrelated files.

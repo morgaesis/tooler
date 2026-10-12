@@ -40,6 +40,7 @@ impl TestContext {
         cmd.env("TOOLER_CONFIG_DIR", self._temp_dir.path().join("config"));
         cmd.env("TOOLER_DATA_DIR", self._temp_dir.path().join("data"));
         cmd.env("TOOLER_STATE_DIR", self._temp_dir.path().join("state"));
+        cmd.env_remove("TOOLER_LOG_FILE");
         cmd.env("TOOLER_BIN_DIR", &self.bin_dir);
         // We will set HOME and XDG_DATA_HOME to our temp dir to isolate data/config
         cmd.env("HOME", self._temp_dir.path());
