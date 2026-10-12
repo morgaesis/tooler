@@ -21,27 +21,43 @@ fn normalize_architecture(arch: &str) -> &str {
 }
 
 #[cfg(any(windows, test))]
-fn windows_host_architecture(machine: std::result::Result<u16, String>, target: &str) -> String {
+#[derive(Debug)]
+enum NativeWindowsMachineError {
+    APIUnavailable,
+    QueryFailed(String),
+}
+
+pub(crate) const WINDOWS_ARCHITECTURE_QUERY_FAILED: &str = "unknown-query-failed";
+
+#[cfg(any(windows, test))]
+fn windows_host_architecture(
+    machine: std::result::Result<u16, NativeWindowsMachineError>,
+    target: &str,
+) -> String {
     match machine {
         Ok(0xAA64) => "arm64".to_string(),
         Ok(0x8664) => "amd64".to_string(),
         Ok(0x014c) => "x86".to_string(),
         Ok(0x01c4) => "arm".to_string(),
         Ok(machine) => {
-            tracing::trace!("Unsupported Windows native machine: {machine:#06x}");
+            tracing::warn!("Unsupported Windows native machine: {machine:#06x}; automatic asset selection disabled");
             format!("unknown-{machine:04x}")
         }
-        Err(reason) => {
-            tracing::trace!(
-                "Windows native architecture unavailable ({reason}); using compile target {target}"
+        Err(NativeWindowsMachineError::APIUnavailable) => {
+            tracing::warn!(
+                "IsWow64Process2 is unavailable; falling back to compile target {target}"
             );
             normalize_architecture(target).to_string()
+        }
+        Err(NativeWindowsMachineError::QueryFailed(reason)) => {
+            tracing::warn!("Windows native architecture query failed ({reason}); automatic asset selection disabled");
+            WINDOWS_ARCHITECTURE_QUERY_FAILED.to_string()
         }
     }
 }
 
 #[cfg(windows)]
-fn native_windows_machine() -> std::result::Result<u16, String> {
+fn native_windows_machine() -> std::result::Result<u16, NativeWindowsMachineError> {
     use windows_sys::core::BOOL;
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
@@ -55,15 +71,15 @@ fn native_windows_machine() -> std::result::Result<u16, String> {
     // SAFETY: The module name is terminated and kernel32 remains loaded for the process lifetime.
     let module = unsafe { GetModuleHandleW(module_name.as_ptr()) };
     if module.is_null() {
-        return Err(format!(
+        return Err(NativeWindowsMachineError::QueryFailed(format!(
             "GetModuleHandleW: {}",
             std::io::Error::last_os_error()
-        ));
+        )));
     }
     // Runtime lookup preserves startup on Windows versions without IsWow64Process2.
     // SAFETY: The module is valid and the export name is terminated.
     let address = unsafe { GetProcAddress(module, c"IsWow64Process2".as_ptr().cast()) }
-        .ok_or_else(|| "IsWow64Process2 is not exported".to_string())?;
+        .ok_or(NativeWindowsMachineError::APIUnavailable)?;
     // SAFETY: The named Windows export has the documented IsWow64Process2 signature.
     let query: IsWow64Process2 = unsafe { std::mem::transmute(address) };
     let mut process_machine = 0;
@@ -77,10 +93,10 @@ fn native_windows_machine() -> std::result::Result<u16, String> {
         )
     } == 0
     {
-        return Err(format!(
+        return Err(NativeWindowsMachineError::QueryFailed(format!(
             "IsWow64Process2: {}",
             std::io::Error::last_os_error()
-        ));
+        )));
     }
     tracing::trace!(
         "Windows process machine: {process_machine:#06x}, native machine: {native_machine:#06x}"
@@ -94,6 +110,10 @@ pub fn find_asset_for_platform(
     system_os: &str,
     system_arch: &str,
 ) -> Result<Option<AssetInfo>> {
+    if system_arch.starts_with("unknown") {
+        tracing::warn!("Cannot automatically select an asset for architecture {system_arch}");
+        return Ok(None);
+    }
     tracing::trace!(
         "Looking for assets matching OS: '{}', ARCH: '{}'",
         system_os,
@@ -363,6 +383,12 @@ pub fn find_asset_in_release_body(
     system_os: &str,
     system_arch: &str,
 ) -> Option<AssetInfo> {
+    if system_arch.starts_with("unknown") {
+        tracing::warn!(
+            "Cannot automatically select a release-body asset for architecture {system_arch}"
+        );
+        return None;
+    }
     let os_aliases = [
         ("linux", vec!["linux", "unknown-linux", "pc-linux"]),
         ("darwin", vec!["darwin", "macos", "osx"]),
@@ -554,15 +580,88 @@ mod tests {
             windows_host_architecture(Ok(0xffff), "x86_64"),
             "unknown-ffff"
         );
-        for reason in ["API missing", "API failed"] {
-            assert_eq!(
-                windows_host_architecture(Err(reason.into()), "x86_64"),
-                "amd64"
+    }
+
+    #[test]
+    fn windows_missing_api_warns_and_allows_compile_target_download() {
+        #[derive(Clone)]
+        struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let capture = Capture(Default::default());
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        let arch = tracing::subscriber::with_default(subscriber, || {
+            windows_host_architecture(Err(NativeWindowsMachineError::APIUnavailable), "x86_64")
+        });
+        assert_eq!(arch, "amd64");
+        let log = String::from_utf8(capture.0.lock().unwrap().clone()).unwrap();
+        assert!(log.contains("WARN"));
+        assert!(
+            log.contains("IsWow64Process2 is unavailable; falling back to compile target x86_64")
+        );
+        assert_eq!(
+            windows_host_architecture(Err(NativeWindowsMachineError::APIUnavailable), "aarch64"),
+            "arm64"
+        );
+        let asset = GitHubAsset {
+            name: "tool-windows-amd64.zip".into(),
+            browser_download_url: "https://example.invalid/tool-windows-amd64.zip".into(),
+        };
+        assert!(
+            find_asset_for_platform(&[asset], "example/tool", "windows", &arch)
+                .unwrap()
+                .is_some()
+        );
+        assert!(find_asset_in_release_body(
+            "[Windows x64](https://example.invalid/tool-windows-amd64.zip)",
+            "windows",
+            &arch
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn windows_failed_query_and_unknown_machine_refuse_automatic_downloads() {
+        let assets: Vec<GitHubAsset> = ["tool-windows.zip", "tool-windows-amd64.zip", "tool.whl"]
+            .into_iter()
+            .map(|name| GitHubAsset {
+                name: name.into(),
+                browser_download_url: format!("https://example.invalid/{name}"),
+            })
+            .collect();
+        let body = "[Windows](https://example.invalid/tool-windows.zip)\n[Windows x64](https://example.invalid/tool-windows-amd64.zip)";
+        let failure = windows_host_architecture(
+            Err(NativeWindowsMachineError::QueryFailed(
+                "query denied".into(),
+            )),
+            "x86_64",
+        );
+        assert_eq!(failure, WINDOWS_ARCHITECTURE_QUERY_FAILED);
+        for arch in [
+            failure,
+            windows_host_architecture(Ok(0), "x86_64"),
+            windows_host_architecture(Ok(0xffff), "x86_64"),
+        ] {
+            assert!(
+                find_asset_for_platform(&assets, "example/tool", "windows", &arch)
+                    .unwrap()
+                    .is_none(),
+                "unexpected automatic asset for {arch}"
             );
-            assert_eq!(
-                windows_host_architecture(Err(reason.into()), "aarch64"),
-                "arm64"
-            );
+            assert!(find_asset_in_release_body(body, "windows", &arch).is_none());
         }
     }
 

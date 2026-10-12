@@ -972,6 +972,15 @@ pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
 }
 
 fn recovery_architecture_matches(system: &PlatformInfo, arch: &str) -> bool {
+    if system.os == "windows" && system.arch == crate::platform::WINDOWS_ARCHITECTURE_QUERY_FAILED {
+        // Existing cache entries can match the process target without assuming a native host.
+        return arch
+            == match std::env::consts::ARCH {
+                "x86_64" => "amd64",
+                "aarch64" => "arm64",
+                target => target,
+            };
+    }
     arch == system.arch
         || (system.os == "windows" && system.arch == "arm64" && matches!(arch, "amd64" | "x86_64"))
 }
@@ -1254,6 +1263,31 @@ mod tests {
         assert!(!recovery_architecture_matches(&system, "arm"));
         assert!(recovery_architecture_matches(&system, "arm64"));
         assert!(recovery_architecture_matches(&system, "x86_64"));
+    }
+
+    #[test]
+    fn recovery_after_failed_query_accepts_only_compile_target_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let target = match std::env::consts::ARCH {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            target => target,
+        };
+        let version_dir = root
+            .path()
+            .join(format!("github/example__tool__{target}/v1.0.0"));
+        fs::create_dir_all(&version_dir).unwrap();
+        fs::write(version_dir.join("tool.cmd"), "@echo off\r\necho tool\r\n").unwrap();
+        let system = PlatformInfo {
+            os: "windows".into(),
+            arch: crate::platform::WINDOWS_ARCHITECTURE_QUERY_FAILED.into(),
+        };
+        let id = ToolIdentifier::parse("example/tool").unwrap();
+        assert!(recover_tool_from_directory(&id, root.path(), &system)
+            .unwrap()
+            .is_some());
+        let incompatible = if target == "arm64" { "amd64" } else { "arm64" };
+        assert!(!recovery_architecture_matches(&system, incompatible));
     }
 
     #[test]
