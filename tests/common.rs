@@ -21,7 +21,9 @@ impl TestContext {
         let config_path = temp_dir.path().join("config.json");
         let bin_dir = temp_dir.path().join("bin");
 
-        let bin_path = PathBuf::from(env!("CARGO_BIN_EXE_tooler"));
+        let bin_path = std::env::var_os("TOOLER_TEST_BINARY")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_tooler")));
 
         Self {
             _temp_dir: temp_dir,

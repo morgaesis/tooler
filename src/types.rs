@@ -63,7 +63,7 @@ fn default_auto_update() -> bool {
 fn default_bin_dir() -> String {
     #[cfg(windows)]
     {
-        return dirs::data_local_dir()
+        dirs::data_local_dir()
             .unwrap_or_else(|| {
                 dirs::home_dir()
                     .unwrap_or_else(|| std::path::PathBuf::from("."))
@@ -73,7 +73,7 @@ fn default_bin_dir() -> String {
             .join("tooler")
             .join("bin")
             .to_string_lossy()
-            .to_string();
+            .to_string()
     }
 
     #[cfg(not(windows))]
