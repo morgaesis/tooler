@@ -4,19 +4,88 @@ use std::collections::HashMap;
 
 pub fn get_system_info() -> PlatformInfo {
     let os = std::env::consts::OS.to_string();
-    let arch = std::env::consts::ARCH.to_string();
+    #[cfg(windows)]
+    let arch = windows_host_architecture(native_windows_machine(), std::env::consts::ARCH);
+    #[cfg(not(windows))]
+    let arch = normalize_architecture(std::env::consts::ARCH).to_string();
 
-    let normalized_arch = match arch.as_str() {
-        "x86_64" => "amd64".to_string(),
-        "aarch64" => "arm64".to_string(),
-        "arm" => "arm".to_string(),
+    PlatformInfo { os, arch }
+}
+
+fn normalize_architecture(arch: &str) -> &str {
+    match arch {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
         _ => arch,
-    };
-
-    PlatformInfo {
-        os,
-        arch: normalized_arch,
     }
+}
+
+#[cfg(any(windows, test))]
+fn windows_host_architecture(machine: std::result::Result<u16, String>, target: &str) -> String {
+    match machine {
+        Ok(0xAA64) => "arm64".to_string(),
+        Ok(0x8664) => "amd64".to_string(),
+        Ok(0x014c) => "x86".to_string(),
+        Ok(0x01c4) => "arm".to_string(),
+        Ok(machine) => {
+            tracing::trace!("Unsupported Windows native machine: {machine:#06x}");
+            format!("unknown-{machine:04x}")
+        }
+        Err(reason) => {
+            tracing::trace!(
+                "Windows native architecture unavailable ({reason}); using compile target {target}"
+            );
+            normalize_architecture(target).to_string()
+        }
+    }
+}
+
+#[cfg(windows)]
+fn native_windows_machine() -> std::result::Result<u16, String> {
+    use windows_sys::core::BOOL;
+    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
+    use windows_sys::Win32::System::SystemInformation::IMAGE_FILE_MACHINE;
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
+    type IsWow64Process2 =
+        unsafe extern "system" fn(HANDLE, *mut IMAGE_FILE_MACHINE, *mut IMAGE_FILE_MACHINE) -> BOOL;
+
+    let module_name: Vec<u16> = "kernel32.dll\0".encode_utf16().collect();
+    // SAFETY: The module name is terminated and kernel32 remains loaded for the process lifetime.
+    let module = unsafe { GetModuleHandleW(module_name.as_ptr()) };
+    if module.is_null() {
+        return Err(format!(
+            "GetModuleHandleW: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // Runtime lookup preserves startup on Windows versions without IsWow64Process2.
+    // SAFETY: The module is valid and the export name is terminated.
+    let address = unsafe { GetProcAddress(module, c"IsWow64Process2".as_ptr().cast()) }
+        .ok_or_else(|| "IsWow64Process2 is not exported".to_string())?;
+    // SAFETY: The named Windows export has the documented IsWow64Process2 signature.
+    let query: IsWow64Process2 = unsafe { std::mem::transmute(address) };
+    let mut process_machine = 0;
+    let mut native_machine = 0;
+    // SAFETY: The current-process pseudo handle is valid and both output pointers are writable.
+    if unsafe {
+        query(
+            GetCurrentProcess(),
+            &mut process_machine,
+            &mut native_machine,
+        )
+    } == 0
+    {
+        return Err(format!(
+            "IsWow64Process2: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    tracing::trace!(
+        "Windows process machine: {process_machine:#06x}, native machine: {native_machine:#06x}"
+    );
+    Ok(native_machine)
 }
 
 pub fn find_asset_for_platform(
@@ -473,6 +542,76 @@ pub fn check_binary_architecture(_path: &std::path::Path) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_native_machine_overrides_emulated_compile_target() {
+        assert_eq!(windows_host_architecture(Ok(0xAA64), "x86_64"), "arm64");
+        assert_eq!(windows_host_architecture(Ok(0x8664), "aarch64"), "amd64");
+        assert_eq!(windows_host_architecture(Ok(0x014c), "x86"), "x86");
+        assert_eq!(windows_host_architecture(Ok(0x01c4), "arm"), "arm");
+        assert_eq!(windows_host_architecture(Ok(0), "x86_64"), "unknown-0000");
+        assert_eq!(
+            windows_host_architecture(Ok(0xffff), "x86_64"),
+            "unknown-ffff"
+        );
+        for reason in ["API missing", "API failed"] {
+            assert_eq!(
+                windows_host_architecture(Err(reason.into()), "x86_64"),
+                "amd64"
+            );
+            assert_eq!(
+                windows_host_architecture(Err(reason.into()), "aarch64"),
+                "arm64"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_native_arm64_selects_native_download() {
+        let assets: Vec<GitHubAsset> = ["tool-windows-amd64.zip", "tool-windows-arm64.zip"]
+            .into_iter()
+            .map(|name| GitHubAsset {
+                name: name.into(),
+                browser_download_url: format!("https://example.invalid/{name}"),
+            })
+            .collect();
+        let arch = windows_host_architecture(Ok(0xAA64), "x86_64");
+        let old_arch = normalize_architecture("x86_64");
+        assert_eq!(
+            find_asset_for_platform(&assets, "example/tool", "windows", old_arch)
+                .unwrap()
+                .unwrap()
+                .name,
+            "tool-windows-amd64.zip"
+        );
+        let asset = find_asset_for_platform(&assets, "example/tool", "windows", &arch)
+            .unwrap()
+            .unwrap();
+        assert_eq!(asset.name, "tool-windows-arm64.zip");
+        let body = "[x64](https://example.invalid/tool-windows-amd64.zip)\n[ARM64](https://example.invalid/tool-windows-arm64.zip)";
+        assert_eq!(
+            find_asset_in_release_body(body, "windows", &arch)
+                .unwrap()
+                .name,
+            "tool-windows-arm64.zip"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_live_native_architecture() {
+        let machine = native_windows_machine();
+        let system = get_system_info();
+        eprintln!(
+            "compile_target={}, native_machine={machine:?}, selected={}",
+            std::env::consts::ARCH,
+            system.arch
+        );
+        assert_eq!(
+            system.arch,
+            windows_host_architecture(machine, std::env::consts::ARCH)
+        );
+    }
 
     #[test]
     fn test_macos_asset_matching_uses_rust_os_name() {

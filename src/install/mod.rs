@@ -968,8 +968,20 @@ pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
     let tool_id = ToolIdentifier::parse(tool_query).map_err(|e| anyhow!(e))?;
     let tools_dir = get_tooler_tools_dir()?;
     let system_info = get_system_info();
+    recover_tool_from_directory(&tool_id, &tools_dir, &system_info)
+}
 
-    let mut scan_dirs = vec![tools_dir.clone()];
+fn recovery_architecture_matches(system: &PlatformInfo, arch: &str) -> bool {
+    arch == system.arch
+        || (system.os == "windows" && system.arch == "arm64" && matches!(arch, "amd64" | "x86_64"))
+}
+
+fn recover_tool_from_directory(
+    tool_id: &ToolIdentifier,
+    tools_dir: &std::path::Path,
+    system_info: &PlatformInfo,
+) -> Result<Option<ToolInfo>> {
+    let mut scan_dirs = vec![tools_dir.to_path_buf()];
     for forge in &["github", "url"] {
         scan_dirs.push(tools_dir.join(forge));
     }
@@ -1012,23 +1024,15 @@ pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
                 _ => continue,
             };
 
-            let expected_dir_name = format!(
-                "{}__{}__{}",
-                tool_id.author,
-                tool_id.tool_name(),
-                system_info.arch
-            );
-            let legacy_dir_name = format!("{}__{}", tool_id.author, tool_id.tool_name());
-
             let dir_matches = if tool_id.author == "unknown" {
                 repo == tool_id.tool_name()
             } else {
-                dir_name == expected_dir_name || dir_name == legacy_dir_name
+                author == tool_id.author && repo == tool_id.tool_name()
             };
 
-            // If arch is present, enforce arch match for either pass.
+            // Recovery accepts existing emulated x64 tools on Windows ARM64.
             if let Some(a) = arch {
-                if a != system_info.arch {
+                if !recovery_architecture_matches(system_info, a) {
                     if dir_matches {
                         tracing::debug!(
                             "Directory {} architecture mismatch: {} != {}",
@@ -1056,7 +1060,7 @@ pub fn try_recover_tool(tool_query: &str) -> Result<Option<ToolInfo>> {
                 &forge_dir,
                 author,
                 repo,
-                &system_info,
+                system_info,
                 &re_version,
             ) else {
                 continue;
@@ -1223,6 +1227,34 @@ pub(crate) fn version_matches(requested: &str, existing: &str) -> bool {
 mod tests {
     use super::*;
     use chrono::Utc;
+
+    #[test]
+    fn recovery_keeps_existing_x64_tools_on_windows_arm64() {
+        let root = tempfile::tempdir().unwrap();
+        let system = PlatformInfo {
+            os: "windows".into(),
+            arch: "arm64".into(),
+        };
+        let version_dir = root.path().join("github/example__tool__amd64/v1.0.0");
+        fs::create_dir_all(&version_dir).unwrap();
+        fs::write(version_dir.join("tool.cmd"), "@echo off\r\necho tool\r\n").unwrap();
+        for query in ["example/tool", "tool"] {
+            let id = ToolIdentifier::parse(query).unwrap();
+            let recovered = recover_tool_from_directory(&id, root.path(), &system)
+                .unwrap()
+                .expect("existing x64 installation remains recoverable");
+            assert_eq!(recovered.repo, "example/tool");
+            assert!(recovered.executable_path.contains("example__tool__amd64"));
+        }
+        let incompatible = PlatformInfo {
+            os: "linux".into(),
+            arch: "arm64".into(),
+        };
+        assert!(!recovery_architecture_matches(&incompatible, "amd64"));
+        assert!(!recovery_architecture_matches(&system, "arm"));
+        assert!(recovery_architecture_matches(&system, "arm64"));
+        assert!(recovery_architecture_matches(&system, "x86_64"));
+    }
 
     #[test]
     fn release_body_prompt_accepts_every_displayed_choice() {
