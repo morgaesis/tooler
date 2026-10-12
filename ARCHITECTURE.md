@@ -110,7 +110,15 @@ running process retains its original inode until it exits.
 Windows schedules replacement through a helper because a running executable
 cannot be overwritten. Scheduling does not establish that replacement has
 completed. The helper waits for the updating process to exit and replaces
-the executable through the Windows file-replacement API.
+the executable through the Windows file-replacement API. Each operation owns
+a unique sibling staging directory, and a target-specific mutex serializes
+replacement. Cleanup validates the operation's marker and removes only its
+known files without recursive deletion.
+
+If another process keeps the executable locked, the staged payload and
+pending status remain intact. A subsequent invocation reports the pending
+operation and schedules another bounded replacement attempt. Completion is
+reported only after replacement succeeds.
 
 ## Shimming & Symlink Creation
 

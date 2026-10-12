@@ -161,7 +161,16 @@ fn test_output_logfile_accepts_explicit_path() {
 
 #[test]
 fn test_auto_shim_creation() {
-    let ctx = TestContext::new();
+    #[allow(unused_mut)]
+    let mut ctx = TestContext::new();
+    #[cfg(windows)]
+    {
+        let tooler_directory = ctx._temp_dir.path().join("tooler ü with spaces");
+        fs::create_dir_all(&tooler_directory).unwrap();
+        let copied_tooler = tooler_directory.join("tooler.exe");
+        fs::copy(&ctx.bin_path, &copied_tooler).unwrap();
+        ctx.bin_path = copied_tooler;
+    }
     let dummy_tool = write_dummy_tool(&ctx, "auto-shim-tools", "dummy-tool");
 
     // Create a dummy config entry to simulate an installed tool
