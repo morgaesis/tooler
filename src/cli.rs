@@ -148,10 +148,19 @@ pub enum Commands {
     #[cfg(windows)]
     #[command(name = "__self-replace", hide = true)]
     SelfReplace {
-        source: PathBuf,
+        directory: PathBuf,
         target: PathBuf,
         #[arg(long)]
-        parent_id: Option<u32>,
+        parent_id: u32,
+    },
+
+    #[cfg(windows)]
+    #[command(name = "__self-cleanup", hide = true)]
+    SelfCleanup {
+        directory: PathBuf,
+        target: PathBuf,
+        #[arg(long)]
+        parent_id: u32,
     },
 
     /// Catch-all for running tools directly

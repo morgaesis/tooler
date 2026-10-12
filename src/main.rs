@@ -35,15 +35,22 @@ async fn main() -> Result<()> {
 
     #[cfg(windows)]
     if let Commands::SelfReplace {
-        source,
+        directory,
         target,
         parent_id,
     } = &cli.command
     {
-        if let Some(parent_id) = parent_id {
-            wait_for_self_update_parent(*parent_id)?;
-        }
-        return complete_pending_self_update(source, target);
+        return run_owned_self_update(directory, target, *parent_id);
+    }
+    #[cfg(windows)]
+    if let Commands::SelfCleanup {
+        directory,
+        target,
+        parent_id,
+    } = &cli.command
+    {
+        wait_for_self_update_parent(*parent_id)?;
+        return cleanup_owned_self_update(directory, target, &env::current_exe()?);
     }
 
     // Setup logging
@@ -51,7 +58,9 @@ async fn main() -> Result<()> {
     tracing::info!("Logging initialized");
 
     #[cfg(windows)]
-    cleanup_stale_self_update_helper();
+    if let Err(error) = report_pending_self_updates(&env::current_exe()?) {
+        eprintln!("Could not inspect pending Tooler self-updates: {error:#}");
+    }
 
     // Load configuration
     let mut config = load_tool_configs()?;
@@ -96,7 +105,9 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         #[cfg(windows)]
-        Commands::SelfReplace { .. } => unreachable!("handled before configuration loading"),
+        Commands::SelfReplace { .. } | Commands::SelfCleanup { .. } => {
+            unreachable!("handled before configuration loading")
+        }
         Commands::List => {
             if let Ok(count) = install::recover_all_installed_tools(&mut config) {
                 if count > 0 {
@@ -174,8 +185,9 @@ async fn main() -> Result<()> {
                             let new_version = find_tool_executable(&config, &tool_id)
                                 .map(|t| t.version)
                                 .unwrap_or_else(|| "unknown".to_string());
-                            handle_self_update(&path, &repo, Some(&new_version))?;
-                            report_update(&tool_id, old_version.as_deref(), &new_version);
+                            if !handle_self_update(&path, &repo, Some(&new_version))? {
+                                report_update(&tool_id, old_version.as_deref(), &new_version);
+                            }
                         }
                         Err(e) => {
                             tracing::error!("Failed to update tool '{}': {}", tool_id, e);
@@ -278,8 +290,9 @@ async fn main() -> Result<()> {
                     let new_version = find_tool_executable(&config, &tool_id)
                         .map(|t| t.version)
                         .unwrap_or_else(|| "unknown".to_string());
-                    handle_self_update(&path, &repo_to_pull, Some(&new_version))?;
-                    report_update(&repo_to_pull, old_version.as_deref(), &new_version);
+                    if !handle_self_update(&path, &repo_to_pull, Some(&new_version))? {
+                        report_update(&repo_to_pull, old_version.as_deref(), &new_version);
+                    }
                     tracing::info!("Path: {}", path.display());
                     if config.settings.auto_shim {
                         if let Err(e) = setup_auto_shim(
@@ -1207,7 +1220,7 @@ fn handle_self_update(
         return Ok(true);
     }
 
-    let current_exe = env::current_exe()?;
+    let current_exe = fs::canonicalize(env::current_exe()?)?;
 
     if let (Ok(source), Ok(target)) = (
         fs::canonicalize(new_executable),
@@ -1224,7 +1237,14 @@ fn handle_self_update(
         new_executable.display()
     );
 
-    let tmp_path = current_exe.with_extension("new");
+    let directory = tempfile::Builder::new()
+        .prefix(".tooler-stage-")
+        .tempdir_in(
+            current_exe
+                .parent()
+                .ok_or_else(|| anyhow!("Executable has no parent directory"))?,
+        )?;
+    let tmp_path = directory.path().join("payload.exe");
     fs::copy(new_executable, &tmp_path)?;
 
     #[cfg(unix)]
@@ -1235,14 +1255,12 @@ fn handle_self_update(
         fs::set_permissions(&tmp_path, perms)?;
         fs::rename(&tmp_path, &current_exe)?;
         tracing::debug!("Self-update: replaced binary at {}", current_exe.display());
+        eprintln!("Tooler self-update completed.");
     }
 
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
-
-        let helper_path = current_exe.with_extension("swap.exe");
+        let helper_path = directory.path().join("runner.exe");
         fs::copy(&current_exe, &helper_path).with_context(|| {
             format!(
                 "Could not create the Windows self-update helper at {}",
@@ -1250,23 +1268,11 @@ fn handle_self_update(
             )
         })?;
 
-        Command::new(&helper_path)
-            .arg("__self-replace")
-            .arg(&tmp_path)
-            .arg(&current_exe)
-            .arg("--parent-id")
-            .arg(std::process::id().to_string())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()
-            .with_context(|| {
-                format!(
-                    "Could not start the Windows self-update helper from {}",
-                    helper_path.display()
-                )
-            })?;
+        write_self_update_marker(directory.path(), &current_exe)?;
+        spawn_self_update_helper(directory.path(), &current_exe)?;
+        // The child owns these files after a successful spawn.
+        let _ = directory.keep();
+        eprintln!("Tooler self-update scheduled; replacement remains pending until running processes release the executable.");
 
         tracing::debug!(
             "Self-update: scheduled replacement of {} after process exit",
@@ -1282,11 +1288,254 @@ fn is_current_tooler_version(version: &str) -> bool {
 }
 
 #[cfg(windows)]
-fn cleanup_stale_self_update_helper() {
-    if let Ok(current_exe) = env::current_exe() {
-        let helper_path = current_exe.with_extension("swap.exe");
-        let _ = fs::remove_file(helper_path);
+#[derive(serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct SelfUpdateMarker {
+    target: PathBuf,
+    payload: String,
+    runner: String,
+}
+
+#[cfg(windows)]
+fn write_self_update_marker(directory: &Path, target: &Path) -> Result<()> {
+    let marker = SelfUpdateMarker {
+        target: fs::canonicalize(target)?,
+        payload: "payload.exe".into(),
+        runner: "runner.exe".into(),
+    };
+    fs::write(directory.join("owner.json"), serde_json::to_vec(&marker)?)?;
+    fs::write(directory.join("status"), b"pending")?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn reject_self_update_reparse_point(path: &Path, directory: bool) -> Result<()> {
+    use std::os::windows::fs::MetadataExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || (directory && !metadata.is_dir())
+        || (!directory && !metadata.is_file())
+    {
+        return Err(anyhow!(
+            "Self-update ownership requires ordinary files and directories"
+        ));
     }
+    Ok(())
+}
+
+/// Validate the entire operation before replacing or removing any of its files.
+#[cfg(windows)]
+fn validate_self_update_directory(directory: &Path, target: &Path) -> Result<PathBuf> {
+    reject_self_update_reparse_point(directory, true)?;
+    reject_self_update_reparse_point(target, false)?;
+    let directory = fs::canonicalize(directory)?;
+    let target = fs::canonicalize(target)?;
+    if directory.parent() != target.parent()
+        || !directory
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(".tooler-stage-"))
+    {
+        return Err(anyhow!(
+            "Self-update directory is not a direct owned sibling of the target"
+        ));
+    }
+    for entry in fs::read_dir(&directory)? {
+        let entry = entry?;
+        if !["owner.json", "status", "payload.exe", "runner.exe"]
+            .iter()
+            .any(|name| entry.file_name() == *name)
+        {
+            return Err(anyhow!("Self-update directory contains an unknown file"));
+        }
+        reject_self_update_reparse_point(&entry.path(), false)?;
+    }
+    let marker: SelfUpdateMarker =
+        serde_json::from_slice(&fs::read(directory.join("owner.json"))?)?;
+    if marker.target != target || marker.payload != "payload.exe" || marker.runner != "runner.exe" {
+        return Err(anyhow!(
+            "Self-update marker does not bind this target and owned files"
+        ));
+    }
+    Ok(directory)
+}
+
+#[cfg(windows)]
+struct SelfUpdateMutex(windows_sys::Win32::Foundation::HANDLE);
+
+#[cfg(windows)]
+impl SelfUpdateMutex {
+    fn acquire(target: &Path) -> Result<Self> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Foundation::{CloseHandle, WAIT_ABANDONED, WAIT_OBJECT_0};
+        use windows_sys::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+        // Stable FNV-1a over the canonical, case-normalized path. Hash collisions
+        // only serialize additional targets; they cannot select another payload.
+        let path = fs::canonicalize(target)?.to_string_lossy().to_lowercase();
+        let hash = path
+            .as_bytes()
+            .iter()
+            .fold(0xcbf29ce484222325u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+            });
+        let name: Vec<u16> = std::ffi::OsStr::new(&format!("Local\\ToolerSelfReplace-{hash:016x}"))
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        let handle = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+        if handle.is_null() {
+            return Err(io::Error::last_os_error()).context("Could not create self-update mutex");
+        }
+        let result = unsafe { WaitForSingleObject(handle, 10_000) };
+        if result != WAIT_OBJECT_0 && result != WAIT_ABANDONED {
+            unsafe { CloseHandle(handle) };
+            return Err(anyhow!(
+                "Could not acquire self-update mutex within ten seconds"
+            ));
+        }
+        Ok(Self(handle))
+    }
+}
+
+#[cfg(windows)]
+impl Drop for SelfUpdateMutex {
+    fn drop(&mut self) {
+        unsafe {
+            windows_sys::Win32::System::Threading::ReleaseMutex(self.0);
+            windows_sys::Win32::Foundation::CloseHandle(self.0);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn spawn_self_update_helper(directory: &Path, target: &Path) -> Result<()> {
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+    let directory = validate_self_update_directory(directory, target)?;
+    // A retry may execute only an exact copy of the currently running image.
+    // The marker alone never grants permission to execute an arbitrary runner.
+    if fs::read(directory.join("runner.exe"))? != fs::read(env::current_exe()?)? {
+        return Err(anyhow!(
+            "Self-update runner does not match the running executable"
+        ));
+    }
+    Command::new(directory.join("runner.exe"))
+        .arg("__self-replace")
+        .arg(&directory)
+        .arg(target)
+        .arg("--parent-id")
+        .arg(std::process::id().to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .context("Could not start the owned self-update helper")?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn run_owned_self_update(directory: &Path, target: &Path, parent_id: u32) -> Result<()> {
+    let directory = validate_self_update_directory(directory, target)?;
+    if fs::canonicalize(env::current_exe()?)? != directory.join("runner.exe") {
+        return Err(anyhow!("Self-update must run from its owned runner"));
+    }
+    wait_for_self_update_parent(parent_id)?;
+    let _mutex = SelfUpdateMutex::acquire(target)?;
+    attempt_owned_self_update(&directory, target)?;
+    use std::os::windows::process::CommandExt;
+    use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+    // The replaced target performs cleanup after this runner exits.
+    Command::new(target)
+        .arg("__self-cleanup")
+        .arg(&directory)
+        .arg(target)
+        .arg("--parent-id")
+        .arg(std::process::id().to_string())
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .context("Replacement completed, but owned directory cleanup could not start")?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn attempt_owned_self_update(directory: &Path, target: &Path) -> Result<()> {
+    let directory = validate_self_update_directory(directory, target)?;
+    if fs::read(directory.join("status"))? == b"completed" {
+        return Ok(());
+    }
+    let result = complete_pending_self_update(&directory.join("payload.exe"), target);
+    match &result {
+        Ok(()) => fs::write(directory.join("status"), b"completed")?,
+        Err(error) => fs::write(directory.join("status"), format!("pending: {error:#}"))?,
+    }
+    result
+}
+
+#[cfg(windows)]
+fn cleanup_owned_self_update(directory: &Path, target: &Path, current_exe: &Path) -> Result<()> {
+    let _mutex = SelfUpdateMutex::acquire(target)?;
+    let directory = validate_self_update_directory(directory, target)?;
+    if fs::canonicalize(current_exe)? != fs::canonicalize(target)?
+        || fs::read(directory.join("status"))? != b"completed"
+        || directory.join("payload.exe").exists()
+    {
+        return Err(anyhow!(
+            "Self-update cleanup requires the completed target image"
+        ));
+    }
+    // No recursive deletion: an unexpected child makes remove_dir fail safely.
+    for name in ["runner.exe", "status", "owner.json"] {
+        let path = directory.join(name);
+        reject_self_update_reparse_point(&path, false)?;
+        fs::remove_file(path)?;
+    }
+    fs::remove_dir(directory)?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn report_pending_self_updates(target: &Path) -> Result<()> {
+    let target = fs::canonicalize(target)?;
+    for entry in fs::read_dir(
+        target
+            .parent()
+            .ok_or_else(|| anyhow!("Executable has no parent"))?,
+    )? {
+        let entry = entry?;
+        if !entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".tooler-stage-")
+        {
+            continue;
+        }
+        let directory = entry.path();
+        if validate_self_update_directory(&directory, &target).is_err() {
+            continue;
+        }
+        // Another helper can finish cleanup between enumeration and this read.
+        let Ok(status) = fs::read_to_string(directory.join("status")) else {
+            continue;
+        };
+        if status == "completed" {
+            eprintln!("Tooler self-update completed.");
+            if let Err(error) = cleanup_owned_self_update(&directory, &target, &env::current_exe()?)
+            {
+                eprintln!("Owned self-update cleanup deferred: {error:#}");
+            }
+        } else {
+            eprintln!("Tooler self-update {status}.");
+            match spawn_self_update_helper(&directory, &target) {
+                Ok(()) => eprintln!("Tooler self-update retry scheduled after this process exits."),
+                Err(error) => eprintln!("Tooler self-update remains pending: {error:#}"),
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -1541,6 +1790,248 @@ mod auto_shim_tests {
 #[cfg(test)]
 mod self_update_tests {
     use super::*;
+
+    #[cfg(windows)]
+    fn owned_stage(parent: &Path, target: &Path, payload: &[u8]) -> tempfile::TempDir {
+        let directory = tempfile::Builder::new()
+            .prefix(".tooler-stage-")
+            .tempdir_in(parent)
+            .unwrap();
+        fs::copy(
+            env::current_exe().unwrap(),
+            directory.path().join("runner.exe"),
+        )
+        .unwrap();
+        fs::write(directory.path().join("payload.exe"), payload).unwrap();
+        write_self_update_marker(directory.path(), target).unwrap();
+        directory
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn concurrent_stages_own_distinct_payloads_and_preserve_siblings() {
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("tooler.exe");
+        fs::write(&target, b"old").unwrap();
+        for name in ["tooler.new", "tooler.swap.exe"] {
+            fs::write(parent.path().join(name), b"unrelated").unwrap();
+        }
+        let stages = std::thread::scope(|scope| {
+            let a = scope.spawn(|| owned_stage(parent.path(), &target, b"A"));
+            let b = scope.spawn(|| owned_stage(parent.path(), &target, b"B"));
+            (a.join().unwrap(), b.join().unwrap())
+        });
+        assert_ne!(stages.0.path(), stages.1.path());
+        let _mutex = SelfUpdateMutex::acquire(&target).unwrap();
+        // Failed B cannot replace A's owned source.
+        assert!(complete_pending_self_update(&stages.1.path().join("missing"), &target).is_err());
+        attempt_owned_self_update(stages.0.path(), &target).unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"A");
+        assert_eq!(fs::read(stages.1.path().join("payload.exe")).unwrap(), b"B");
+        for name in ["tooler.new", "tooler.swap.exe"] {
+            assert_eq!(fs::read(parent.path().join(name)).unwrap(), b"unrelated");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn owned_cleanup_refuses_foreign_contents_and_wrong_target() {
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("tooler.exe");
+        fs::write(&target, b"old").unwrap();
+        let stage = owned_stage(parent.path(), &target, b"new");
+        attempt_owned_self_update(stage.path(), &target).unwrap();
+        fs::write(stage.path().join("foreign"), b"keep").unwrap();
+        assert!(cleanup_owned_self_update(stage.path(), &target, &target).is_err());
+        assert_eq!(fs::read(stage.path().join("foreign")).unwrap(), b"keep");
+        assert!(stage.path().join("runner.exe").exists());
+        fs::remove_file(stage.path().join("foreign")).unwrap();
+        assert!(
+            cleanup_owned_self_update(stage.path(), &target, &env::current_exe().unwrap()).is_err()
+        );
+        cleanup_owned_self_update(stage.path(), &target, &target).unwrap();
+        assert!(!stage.path().exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ownership_rejects_marker_mismatch_and_nested_directories() {
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("tooler.exe");
+        let other = parent.path().join("other.exe");
+        fs::write(&target, b"old").unwrap();
+        fs::write(&other, b"foreign").unwrap();
+        let stage = owned_stage(parent.path(), &target, b"new");
+        write_self_update_marker(stage.path(), &other).unwrap();
+        assert!(validate_self_update_directory(stage.path(), &target).is_err());
+        assert_eq!(fs::read(stage.path().join("payload.exe")).unwrap(), b"new");
+        write_self_update_marker(stage.path(), &target).unwrap();
+        fs::create_dir(stage.path().join("runner-directory")).unwrap();
+        assert!(validate_self_update_directory(stage.path(), &target).is_err());
+        assert_eq!(fs::read(&other).unwrap(), b"foreign");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ownership_refuses_a_symlink_without_touching_its_destination() {
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("tooler.exe");
+        let foreign = parent.path().join("foreign");
+        fs::write(&target, b"old").unwrap();
+        fs::write(&foreign, b"foreign").unwrap();
+        let stage = owned_stage(parent.path(), &target, b"new");
+        fs::remove_file(stage.path().join("payload.exe")).unwrap();
+        match std::os::windows::fs::symlink_file(&foreign, stage.path().join("payload.exe")) {
+            Ok(()) => {
+                assert!(validate_self_update_directory(stage.path(), &target).is_err());
+                assert!(attempt_owned_self_update(stage.path(), &target).is_err());
+                assert_eq!(fs::read(&foreign).unwrap(), b"foreign");
+            }
+            Err(error) if error.raw_os_error() == Some(1314) => {
+                eprintln!("Symlink fixture requires Windows developer mode or symlink privilege");
+            }
+            Err(error) => panic!("Could not create symlink fixture: {error}"),
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn locked_target_retains_pending_payload_then_retry_completes() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("tooler.exe");
+        fs::write(&target, b"old").unwrap();
+        let stage = owned_stage(parent.path(), &target, b"new");
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&target)
+            .unwrap();
+        {
+            let _mutex = SelfUpdateMutex::acquire(&target).unwrap();
+            assert!(attempt_owned_self_update(stage.path(), &target).is_err());
+        }
+        assert!(fs::read_to_string(stage.path().join("status"))
+            .unwrap()
+            .starts_with("pending:"));
+        assert_eq!(fs::read(stage.path().join("payload.exe")).unwrap(), b"new");
+        assert_eq!(fs::read(&target).unwrap(), b"old");
+        drop(lock);
+        {
+            let _mutex = SelfUpdateMutex::acquire(&target).unwrap();
+            attempt_owned_self_update(stage.path(), &target).unwrap();
+        }
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+        assert_eq!(fs::read(stage.path().join("status")).unwrap(), b"completed");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn ordinary_invocation_reports_pending_and_retries_owned_helper() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+        let parent = tempfile::tempdir().unwrap();
+        let product = env::current_exe()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("tooler.exe");
+        let target = parent.path().join("tooler.exe");
+        fs::copy(&product, &target).unwrap();
+        for name in ["tooler.new", "tooler.swap.exe"] {
+            fs::write(parent.path().join(name), b"unrelated").unwrap();
+        }
+        let stage = tempfile::Builder::new()
+            .prefix(".tooler-stage-")
+            .tempdir_in(parent.path())
+            .unwrap();
+        fs::copy(&product, stage.path().join("runner.exe")).unwrap();
+        fs::copy(&product, stage.path().join("payload.exe")).unwrap();
+        let mut payload = fs::read(stage.path().join("payload.exe")).unwrap();
+        payload.extend_from_slice(b"owned-payload-test");
+        fs::write(stage.path().join("payload.exe"), &payload).unwrap();
+        let config = parent.path().join("config.json");
+        let data = parent.path().join("data");
+        let bin = parent.path().join("bin");
+        let invoke = || {
+            let mut command = Command::new(&target);
+            command
+                .arg("version")
+                .env("TOOLER_CONFIG", &config)
+                .env("TOOLER_DATA_DIR", &data)
+                .env("TOOLER_BIN_DIR", &bin);
+            command
+        };
+        // A normal invocation must never touch similarly named unrelated files.
+        // Use the runner directly for the first attempt so its failure is observed.
+        let mut updating_parent = invoke().spawn().unwrap();
+        updating_parent.wait().unwrap();
+        write_self_update_marker(stage.path(), &target).unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&target)
+            .unwrap();
+        let first = Command::new(stage.path().join("runner.exe"))
+            .arg("__self-replace")
+            .arg(stage.path())
+            .arg(&target)
+            .arg("--parent-id")
+            .arg(updating_parent.id().to_string())
+            .output()
+            .unwrap();
+        assert!(!first.status.success());
+        assert!(fs::read_to_string(stage.path().join("status"))
+            .unwrap()
+            .starts_with("pending:"));
+        assert!(stage.path().join("payload.exe").exists());
+        drop(lock);
+        let report = invoke().output().unwrap();
+        assert!(report.status.success());
+        let stderr = String::from_utf8(report.stderr).unwrap();
+        assert!(stderr.contains("Tooler self-update pending"), "{stderr}");
+        assert!(stderr.contains("retry scheduled"), "{stderr}");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while stage.path().exists() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        assert!(
+            !stage.path().exists(),
+            "Retry must replace and clean its owned directory; status={:?}, report={stderr}",
+            fs::read_to_string(stage.path().join("status"))
+        );
+        assert!(invoke().output().unwrap().status.success());
+        assert_eq!(fs::read(&target).unwrap(), payload);
+        for name in ["tooler.new", "tooler.swap.exe"] {
+            assert_eq!(fs::read(parent.path().join(name)).unwrap(), b"unrelated");
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn target_mutex_serializes_threads_and_normalizes_case() {
+        let parent = tempfile::tempdir().unwrap();
+        let target = parent.path().join("tooler.exe");
+        fs::write(&target, b"old").unwrap();
+        let guard = SelfUpdateMutex::acquire(&target).unwrap();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let upper = PathBuf::from(target.to_string_lossy().to_uppercase());
+            let _guard = SelfUpdateMutex::acquire(&upper).unwrap();
+            sender.send(()).unwrap();
+        });
+        assert!(receiver
+            .recv_timeout(std::time::Duration::from_millis(150))
+            .is_err());
+        drop(guard);
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        worker.join().unwrap();
+    }
 
     #[test]
     fn test_current_tooler_version_accepts_optional_v_prefix() {
