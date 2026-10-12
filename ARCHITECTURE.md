@@ -44,6 +44,14 @@ Tools are stored in the user's data directory (typically `~/.local/share/tooler/
 
 ## Asset Selection
 
+On Windows, native host architecture takes precedence over the executable's
+compile target. Tooler resolves `IsWow64Process2` at runtime and uses its native
+machine result. If the API is unavailable or fails, a trace diagnostic identifies
+the compile-target fallback. Unknown native machines do not match a supported
+architecture. Recovery also accepts existing x64 installations on Windows ARM64.
+The installers query native architecture before downloading; compatibility
+fallbacks emit a warning when the native query is unavailable.
+
 When installing a tool from GitHub, Tooler categorizes all release assets into a 3x3 matrix of (os+arch, os-only, arch-only) x (archive, binary, package). Categories are checked in priority order: `os_arch_archive` > `os_arch_binary` > `os_arch_package`.
 
 Within a category:
