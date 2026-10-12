@@ -153,8 +153,10 @@ On Unix, `create_tool_symlink` links `bin_dir/<tool_name>` to `tooler-shim`.
 On Windows, it copies both master launchers to `<tool_name>` and
 `<tool_name>.cmd`, refreshing stale content on `pull` or `run`. Windows
 executable suffixes are stripped case-insensitively. Launchers derive the
-command name from their filename and dispatch through the absolute Tooler
-executable path. Bash forwards its argument array; the native launcher uses
+command name from their filename. Bash dispatches through the absolute Tooler
+executable path and forwards its argument array. Native launchers use a
+colocated `tooler.exe`, or resolve `tooler` on PATH for a custom shim directory.
+Their ASCII source avoids console-code-page-dependent paths. The native launcher uses
 batch argument handling, disables delayed expansion, and returns the child
 exit status.
 

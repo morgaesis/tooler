@@ -170,6 +170,7 @@ fn test_auto_shim_creation() {
         let copied_tooler = tooler_directory.join("tooler.exe");
         fs::copy(&ctx.bin_path, &copied_tooler).unwrap();
         ctx.bin_path = copied_tooler;
+        ctx.bin_dir = ctx._temp_dir.path().join("shims ü with spaces");
     }
     let dummy_tool = write_dummy_tool(&ctx, "auto-shim-tools", "dummy-tool");
 
@@ -243,7 +244,10 @@ fn test_auto_shim_creation() {
             "Bash launchers require LF line endings"
         );
 
-        // The same installation must resolve in every shell without tooler on PATH.
+        // Native launchers resolve a colocated manager without literal paths.
+        let native_manager = ctx.bin_dir.join("tooler.exe");
+        fs::copy(&ctx.bin_path, &native_manager).unwrap();
+        assert!(fs::read(&tool_shim).unwrap().is_ascii());
         let system_root = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
         let native_path =
             std::env::join_paths([ctx.bin_dir.clone(), system_root.join("System32")]).unwrap();
@@ -263,6 +267,17 @@ fn test_auto_shim_creation() {
             .to_string_lossy()
             .replace('\\', "/")
             .replace('\'', "'\\''");
+        let cmd = system_root.join("System32").join("cmd.exe");
+        let code_page = Command::new(&cmd)
+            .args(["/D", "/C", "chcp"])
+            .output()
+            .unwrap();
+        assert!(code_page.status.success());
+        let code_page_output = String::from_utf8_lossy(&code_page.stdout);
+        let original_code_page = code_page_output
+            .split_whitespace()
+            .find(|token| token.chars().all(|character| character.is_ascii_digit()))
+            .expect("chcp must report a numeric code page");
         let mut shells = vec![
             (system_root.join("System32").join("cmd.exe"), vec!["/D".to_string(), "/C".to_string(),
                 "dummy-tool \"two words\" --help".to_string()]),
@@ -272,6 +287,8 @@ fn test_auto_shim_creation() {
             (bash, vec!["--noprofile".to_string(), "--norc".to_string(), "-c".to_string(),
                 format!("export PATH=/usr/bin:/bin; shim_directory=$(cygpath -u '{bash_directory}'); export PATH=\"$shim_directory:$PATH\"; command -v dummy-tool; dummy-tool 'two words' --help")]),
         ];
+        shells.push((cmd, vec!["/D".into(), "/V:ON".into(), "/C".into(),
+            format!("chcp 437 >nul & dummy-tool \"two words\" --help & set \"shim_status=!errorlevel!\" & chcp {original_code_page} >nul & exit /b !shim_status!")]));
         let pwsh =
             PathBuf::from(std::env::var_os("ProgramFiles").unwrap()).join("PowerShell/7/pwsh.exe");
         if pwsh.is_file() {
@@ -304,6 +321,24 @@ fn test_auto_shim_creation() {
                 .assert_stdout_contains("two words")
                 .assert_stdout_contains("--help");
         }
+
+        // A custom shim directory supports a manager located elsewhere on PATH.
+        fs::remove_file(&native_manager).unwrap();
+        let custom_native_path = std::env::join_paths([
+            ctx.bin_dir.clone(),
+            ctx.bin_path.parent().unwrap().to_path_buf(),
+            system_root.join("System32"),
+        ])
+        .unwrap();
+        for (shell, args) in &shells {
+            let output: CommandOutput = shim_shell_command(&ctx, shell, args)
+                .env("PATH", &custom_native_path)
+                .output()
+                .unwrap()
+                .into();
+            output.assert_success().assert_stdout_contains("two words");
+        }
+        fs::copy(&ctx.bin_path, &native_manager).unwrap();
 
         // Existing installations heal both the legacy native and Bash companions.
         fs::write(&tool_shim, "stale native launcher").unwrap();

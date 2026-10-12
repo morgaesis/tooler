@@ -147,6 +147,8 @@ launchers with native batch argument handling. Tooler creates both formats
 automatically, so the same installation supports switching between shells.
 PowerShell does not require a generated `.ps1` script or an execution-policy
 change. Running or pulling an installed tool refreshes stale launchers.
+Native launchers use `tooler.exe` in the same directory, or `tooler` on PATH
+when the shim directory is configured separately.
 
 For a manually configured Git Bash installation, add the native directory:
 
