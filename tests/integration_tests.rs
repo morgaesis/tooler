@@ -3,7 +3,6 @@ mod common;
 use common::{CommandOutput, TestContext};
 use std::fs;
 use std::path::PathBuf;
-#[cfg(not(windows))]
 use std::process::Command;
 
 fn write_dummy_tool(ctx: &TestContext, dir_name: &str, tool_name: &str) -> PathBuf {
@@ -224,6 +223,117 @@ fn test_auto_shim_creation() {
         tool_shim.display()
     );
 
+    #[cfg(windows)]
+    {
+        let bash_shim = ctx.bin_dir.join("dummy-tool");
+        assert!(bash_shim.exists(), "Git Bash companion is missing");
+        let content = fs::read_to_string(&bash_shim).unwrap();
+        assert!(content.contains(&ctx.bin_path.to_string_lossy().replace('\\', "/")));
+        assert!(
+            !content.contains('\r'),
+            "Bash launchers require LF line endings"
+        );
+
+        // The same installation must resolve in every shell without tooler on PATH.
+        let system_root = PathBuf::from(std::env::var_os("SystemRoot").unwrap());
+        let native_path =
+            std::env::join_paths([ctx.bin_dir.clone(), system_root.join("System32")]).unwrap();
+        let powershell = system_root.join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let bash = std::env::var_os("TOOLER_TEST_BASH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                PathBuf::from(std::env::var_os("ProgramFiles").unwrap()).join("Git/bin/bash.exe")
+            });
+        assert!(
+            bash.is_file(),
+            "Git Bash is required; set TOOLER_TEST_BASH to its bash executable"
+        );
+
+        let bash_directory = ctx
+            .bin_dir
+            .to_string_lossy()
+            .replace('\\', "/")
+            .replace('\'', "'\\''");
+        let mut shells = vec![
+            (system_root.join("System32").join("cmd.exe"), vec!["/D".to_string(), "/C".to_string(),
+                "dummy-tool \"two words\" --help".to_string()]),
+            (powershell, vec!["-NoLogo".to_string(), "-NoProfile".to_string(),
+                "-ExecutionPolicy".to_string(), "Restricted".to_string(), "-Command".to_string(),
+                "& dummy-tool 'two words' '--help'; exit $LASTEXITCODE".to_string()]),
+            (bash, vec!["--noprofile".to_string(), "--norc".to_string(), "-c".to_string(),
+                format!("export PATH=/usr/bin:/bin; shim_directory=$(cygpath -u '{bash_directory}'); export PATH=\"$shim_directory:$PATH\"; command -v dummy-tool; dummy-tool 'two words' --help")]),
+        ];
+        let pwsh =
+            PathBuf::from(std::env::var_os("ProgramFiles").unwrap()).join("PowerShell/7/pwsh.exe");
+        if pwsh.is_file() {
+            shells.push((
+                pwsh,
+                vec![
+                    "-NoLogo".to_string(),
+                    "-NoProfile".to_string(),
+                    "-ExecutionPolicy".to_string(),
+                    "Restricted".to_string(),
+                    "-Command".to_string(),
+                    "& dummy-tool 'two words' '--help'; exit $LASTEXITCODE".to_string(),
+                ],
+            ));
+        }
+        for (shell, args) in &shells {
+            let output: CommandOutput = shim_shell_command(&ctx, shell, args)
+                .env("PATH", &native_path)
+                .output()
+                .unwrap()
+                .into();
+            assert!(
+                output.status.success(),
+                "{} failed: {}",
+                shell.display(),
+                output.stderr
+            );
+            output
+                .assert_success()
+                .assert_stdout_contains("two words")
+                .assert_stdout_contains("--help");
+        }
+
+        // Existing installations heal both the legacy native and Bash companions.
+        fs::write(&tool_shim, "stale native launcher").unwrap();
+        fs::write(&bash_shim, "stale Bash launcher").unwrap();
+        let refreshed: CommandOutput = ctx
+            .cmd()
+            .args(["run", "dummy-tool", "version"])
+            .output()
+            .unwrap()
+            .into();
+        refreshed.assert_success();
+        assert_eq!(
+            fs::read_to_string(&tool_shim).unwrap(),
+            fs::read_to_string(&shim_script).unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(&bash_shim).unwrap(),
+            fs::read_to_string(ctx.bin_dir.join("tooler-shim")).unwrap()
+        );
+
+        fs::write(
+            &dummy_tool,
+            "@echo off\r\necho dummy tool %*\r\nexit /b 37\r\n",
+        )
+        .unwrap();
+        for (shell, args) in &shells {
+            let output = shim_shell_command(&ctx, shell, args)
+                .env("PATH", &native_path)
+                .output()
+                .unwrap();
+            assert_eq!(
+                output.status.code(),
+                Some(37),
+                "{} must forward the child exit status",
+                shell.display()
+            );
+        }
+    }
+
     #[cfg(not(windows))]
     {
         let shim_content =
@@ -274,6 +384,28 @@ fn test_auto_shim_creation() {
         assert!(log_content.contains("tool=dummy-tool"));
         assert!(log_content.contains("tooler-binary-missing-or-not-executable"));
     }
+}
+
+#[cfg(windows)]
+fn shim_shell_command(ctx: &TestContext, shell: &std::path::Path, args: &[String]) -> Command {
+    let mut command = Command::new(shell);
+    command
+        .env("TOOLER_CONFIG", &ctx.config_path)
+        .env("TOOLER_CONFIG_PATH", &ctx.config_path)
+        .env("TOOLER_CONFIG_DIR", ctx._temp_dir.path().join("config"))
+        .env("TOOLER_DATA_DIR", ctx._temp_dir.path().join("data"))
+        .env("TOOLER_BIN_DIR", &ctx.bin_dir)
+        .env("TOOLER_STATE_DIR", ctx._temp_dir.path().join("state"))
+        .env("HOME", ctx._temp_dir.path());
+    if shell.file_name().is_some_and(|name| name == "cmd.exe") {
+        use std::os::windows::process::CommandExt;
+        command
+            .args(&args[..args.len() - 1])
+            .raw_arg(&args[args.len() - 1]);
+    } else {
+        command.args(args);
+    }
+    command
 }
 
 #[test]

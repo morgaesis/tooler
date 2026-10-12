@@ -132,11 +132,26 @@ tooler config unset auto-shim
 
 ### Shell Integration
 
-To use `tooler` and the tools it manages, add the following to your shell profile (`.bashrc`, `.zshrc`, etc.). The installation script handles this automatically for standard setups:
+The installation scripts add Tooler's binary and shim directory to the shell
+configuration. On Linux and macOS, the default directory is
+`~/.local/share/tooler/bin`:
 
 ```bash
 # Path for tooler and managed tool shims
 export PATH="$HOME/.local/share/tooler/bin:$PATH"
+```
+
+On Windows, the default directory is `%LOCALAPPDATA%\tooler\bin`. Git Bash
+uses extensionless Bash launchers; PowerShell and Command Prompt use `.cmd`
+launchers with native batch argument handling. Tooler creates both formats
+automatically, so the same installation supports switching between shells.
+PowerShell does not require a generated `.ps1` script or an execution-policy
+change. Running or pulling an installed tool refreshes stale launchers.
+
+For a manually configured Git Bash installation, add the native directory:
+
+```bash
+export PATH="$(cygpath -u "$LOCALAPPDATA")/tooler/bin:$PATH"
 ```
 
 ## How it Works

@@ -110,7 +110,13 @@ When `tooler update` or `tooler pull` targets tooler itself (`morgaesis/tooler`)
 
 ## Shimming & Symlink Creation
 
-When `auto_shim` is enabled (default: true, Unix only), Tooler creates a shim-based dispatch system in `bin_dir` (default: `~/.local/share/tooler/bin/`):
+When `auto_shim` is enabled (default: true), Tooler creates launchers in
+`bin_dir`: `~/.local/share/tooler/bin` on Unix and
+`%LOCALAPPDATA%\tooler\bin` on Windows. Windows installs both extensionless
+Bash scripts and `.cmd` launchers. The invoking shell selects its supported
+format through command lookup; installation does not depend on the terminal
+that runs Tooler. PowerShell uses the native `.cmd` launcher without a script
+execution-policy requirement.
 
 ### Shim Script
 
@@ -120,7 +126,7 @@ absolute Tooler executable path that generated the shim:
 #!/bin/bash
 tool_name="${0##*/}"
 tooler_bin='/path/to/tooler'
-exec "$tooler_bin" run "$tool_name" "$@"
+exec "$tooler_bin" run "$tool_name" -- "$@"
 ```
 
 `create_shim_script` rewrites stale shim content so old wrappers heal on the
@@ -131,7 +137,14 @@ executable, the shim logs a failure to `$XDG_STATE_HOME/tooler/shim.log` or
 
 ### Symlink Creation
 
-For each tool, `create_tool_symlink` creates a symlink from `bin_dir/<tool_name>` pointing to `tooler-shim`. When the symlink is invoked, `basename $0` resolves to the tool name, which `tooler run` then resolves through the standard tool resolution chain.
+On Unix, `create_tool_symlink` links `bin_dir/<tool_name>` to `tooler-shim`.
+On Windows, it copies both master launchers to `<tool_name>` and
+`<tool_name>.cmd`, refreshing stale content on `pull` or `run`. Windows
+executable suffixes are stripped case-insensitively. Launchers derive the
+command name from their filename and dispatch through the absolute Tooler
+executable path. Bash forwards its argument array; the native launcher uses
+batch argument handling, disables delayed expansion, and returns the child
+exit status.
 
 ### Multi-Binary Symlinks
 

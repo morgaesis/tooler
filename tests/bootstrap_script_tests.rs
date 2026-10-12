@@ -3,7 +3,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use tempfile::TempDir;
 
-// All release commands are shell functions. The installer only touches this
+// All release commands are shell functions. The bootstrap only touches this
 // fixture's home, installation directory, and extraction directory.
 const FIXTURE: &str = r#"
 set -eo pipefail
@@ -97,12 +97,15 @@ fn run_fixture(
     let windows = os != "Linux" && os != "Darwin";
     let binary = if windows { "tooler.exe" } else { "tooler" };
     let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("install.sh");
-    let mut command = Command::new("bash");
+    let bash = std::env::var_os("TOOLER_TEST_BASH").unwrap_or_else(|| "bash".into());
+    let mut command = Command::new(bash);
     // Only the executable search path is inherited; credentials and Tooler state
     // are excluded from the child environment.
     command
         .env_clear()
         .env("PATH", std::env::var_os("PATH").unwrap());
+    #[cfg(windows)]
+    command.env("SystemRoot", std::env::var_os("SystemRoot").unwrap());
     let mut child = command
         .args(["--noprofile", "--norc", "-s", "--"])
         .arg(root.path())
