@@ -41,7 +41,10 @@ pub fn find_asset_for_platform(
         ("linux", vec!["linux", "unknown-linux", "pc-linux"]),
         ("darwin", vec!["darwin", "macos", "osx"]),
         ("macos", vec!["darwin", "macos", "osx"]),
-        ("windows", vec!["windows", "win", "cygwin"]),
+        (
+            "windows",
+            vec!["windows", "win", "win32", "win64", "cygwin"],
+        ),
     ];
 
     let arch_aliases = [
@@ -109,7 +112,10 @@ pub fn find_asset_for_platform(
                     }
 
                     let os_match = os_aliases.iter().any(|(os, aliases)| {
-                        os == &system_os && aliases.iter().any(|alias| name_lower.contains(alias))
+                        os == &system_os
+                            && aliases
+                                .iter()
+                                .any(|alias| contains_platform_token(&name_lower, alias))
                     });
 
                     let arch_match = arch_aliases.iter().any(|(arch, aliases)| {
@@ -118,7 +124,7 @@ pub fn find_asset_for_platform(
                         }
 
                         aliases.iter().any(|alias| {
-                            if !name_lower.contains(alias) {
+                            if !contains_platform_token(&name_lower, alias) {
                                 return false;
                             }
 
@@ -229,12 +235,16 @@ fn categorize_assets(
             continue;
         }
 
-        let has_os = os_aliases
-            .iter()
-            .any(|(_, aliases)| aliases.iter().any(|alias| name_lower.contains(alias)));
-        let has_arch = arch_aliases
-            .iter()
-            .any(|(_, aliases)| aliases.iter().any(|alias| name_lower.contains(alias)));
+        let has_os = os_aliases.iter().any(|(_, aliases)| {
+            aliases
+                .iter()
+                .any(|alias| contains_platform_token(&name_lower, alias))
+        });
+        let has_arch = arch_aliases.iter().any(|(_, aliases)| {
+            aliases
+                .iter()
+                .any(|alias| contains_platform_token(&name_lower, alias))
+        });
 
         let is_archive = archive_exts.iter().any(|ext| name_lower.ends_with(ext));
         let is_package = package_exts.iter().any(|ext| name_lower.ends_with(ext));
@@ -288,7 +298,10 @@ pub fn find_asset_in_release_body(
         ("linux", vec!["linux", "unknown-linux", "pc-linux"]),
         ("darwin", vec!["darwin", "macos", "osx"]),
         ("macos", vec!["darwin", "macos", "osx"]),
-        ("windows", vec!["windows", "win", "cygwin"]),
+        (
+            "windows",
+            vec!["windows", "win", "win32", "win64", "cygwin"],
+        ),
     ];
 
     let arch_aliases = [
@@ -338,7 +351,10 @@ pub fn find_asset_in_release_body(
         let search_text = format!("{} {}", link_text, url_filename.to_lowercase());
 
         let os_match = os_aliases.iter().any(|(os, aliases)| {
-            os == &system_os && aliases.iter().any(|alias| search_text.contains(alias))
+            os == &system_os
+                && aliases
+                    .iter()
+                    .any(|alias| contains_platform_token(&search_text, alias))
         });
 
         let arch_match = arch_aliases.iter().any(|(arch, aliases)| {
@@ -346,7 +362,7 @@ pub fn find_asset_in_release_body(
                 return false;
             }
             aliases.iter().any(|alias| {
-                if !search_text.contains(alias) {
+                if !contains_platform_token(&search_text, alias) {
                     return false;
                 }
                 if alias == &"arm" && search_text.contains("arm64") {
@@ -366,6 +382,25 @@ pub fn find_asset_in_release_body(
     }
 
     candidates.into_iter().next()
+}
+
+fn contains_platform_token(text: &str, token: &str) -> bool {
+    text.match_indices(token).any(|(start, matched)| {
+        let end = start + matched.len();
+        // x86 is a 32-bit alias, not the prefix of the x86_64 or x86-64 aliases.
+        if token == "x86" && (text[end..].starts_with("_64") || text[end..].starts_with("-64")) {
+            return false;
+        }
+        let before_is_boundary = text[..start]
+            .chars()
+            .next_back()
+            .is_none_or(|character| !character.is_ascii_alphanumeric());
+        let after_is_boundary = text[end..]
+            .chars()
+            .next()
+            .is_none_or(|character| !character.is_ascii_alphanumeric());
+        before_is_boundary && after_is_boundary
+    })
 }
 
 pub fn is_musl_system() -> bool {
@@ -461,5 +496,121 @@ mod tests {
             .expect("macos arm64 body URL should match");
 
         assert_eq!(asset.name, "gh_2.92.0_macOS_arm64.zip");
+    }
+
+    #[test]
+    fn test_windows_arm64_does_not_match_darwin_asset() {
+        let assets = vec![
+            GitHubAsset {
+                name: "tooler-v0.7.7-aarch64-apple-darwin.tar.gz".to_string(),
+                browser_download_url: "https://example.invalid/darwin".to_string(),
+            },
+            GitHubAsset {
+                name: "tooler-v0.7.7-aarch64-pc-windows-msvc.zip".to_string(),
+                browser_download_url: "https://example.invalid/windows".to_string(),
+            },
+        ];
+
+        let asset = find_asset_for_platform(&assets, "morgaesis/tooler", "windows", "arm64")
+            .unwrap()
+            .expect("Windows ARM64 asset should match");
+
+        assert_eq!(asset.name, "tooler-v0.7.7-aarch64-pc-windows-msvc.zip");
+    }
+
+    #[test]
+    fn test_windows_arm64_release_body_does_not_match_darwin_link() {
+        let body = concat!(
+            "[Darwin ARM64](https://example.invalid/tooler-aarch64-apple-darwin.tar.gz)\n",
+            "[Windows ARM64](https://example.invalid/tooler-aarch64-pc-windows-msvc.zip)"
+        );
+
+        let asset = find_asset_in_release_body(body, "windows", "arm64")
+            .expect("Windows ARM64 body URL should match");
+
+        assert_eq!(asset.name, "tooler-aarch64-pc-windows-msvc.zip");
+    }
+
+    #[test]
+    fn test_windows_arm64_rejects_darwin_only_release_body() {
+        let body = "[Darwin ARM64](https://example.invalid/tooler-aarch64-apple-darwin.tar.gz)";
+
+        assert!(find_asset_in_release_body(body, "windows", "arm64").is_none());
+    }
+
+    #[test]
+    fn test_platform_tokens_require_boundaries() {
+        assert!(contains_platform_token("tool-win-arm64.zip", "win"));
+        assert!(contains_platform_token("tool-win64.zip", "win64"));
+        assert!(!contains_platform_token("tool-darwin-arm64.zip", "win"));
+        assert!(!contains_platform_token("tool-arm64.zip", "arm"));
+        assert!(!contains_platform_token("tool-x86_64.zip", "x86"));
+        assert!(!contains_platform_token("tool-x86-64.zip", "x86"));
+        assert!(!contains_platform_token("tool-notamd64.zip", "amd64"));
+        assert!(contains_platform_token("tool_windows_amd64.zip", "amd64"));
+        assert!(contains_platform_token("tool-x86_64.zip", "x86_64"));
+    }
+
+    #[test]
+    fn test_architecture_aliases_do_not_match_larger_tokens() {
+        for (arch, wrong, right) in [
+            ("i386", "x86_64", "x86"),
+            ("i686", "x86-64", "i686"),
+            ("arm", "arm64", "armv7"),
+            ("amd64", "notamd64", "x64"),
+        ] {
+            let wrong_name = format!("tool-windows-{wrong}.zip");
+            let right_name = format!("tool-windows-{right}.zip");
+            let assets = vec![
+                GitHubAsset {
+                    name: wrong_name.clone(),
+                    browser_download_url: format!("https://example.invalid/{wrong_name}"),
+                },
+                GitHubAsset {
+                    name: right_name.clone(),
+                    browser_download_url: format!("https://example.invalid/{right_name}"),
+                },
+            ];
+            assert_eq!(
+                find_asset_for_platform(&assets, "example/tool", "windows", arch)
+                    .unwrap()
+                    .unwrap()
+                    .name,
+                right_name
+            );
+            let body = format!("[Download](https://example.invalid/{wrong_name})\n[Download](https://example.invalid/{right_name})");
+            assert_eq!(
+                find_asset_in_release_body(&body, "windows", arch)
+                    .unwrap()
+                    .name,
+                right_name
+            );
+        }
+    }
+
+    #[test]
+    fn test_unix_platform_aliases_keep_matching() {
+        for (os, arch, name) in [
+            ("linux", "amd64", "tool-x86_64-unknown-linux-gnu.tar.gz"),
+            ("macos", "arm64", "tool-aarch64-apple-darwin.tar.gz"),
+            ("darwin", "amd64", "tool-macos-x64.zip"),
+        ] {
+            let asset = GitHubAsset {
+                name: name.to_string(),
+                browser_download_url: format!("https://example.invalid/{name}"),
+            };
+            assert_eq!(
+                find_asset_for_platform(&[asset], "example/tool", os, arch)
+                    .unwrap()
+                    .unwrap()
+                    .name,
+                name
+            );
+            let body = format!("[Download](https://example.invalid/{name})");
+            assert_eq!(
+                find_asset_in_release_body(&body, os, arch).unwrap().name,
+                name
+            );
+        }
     }
 }

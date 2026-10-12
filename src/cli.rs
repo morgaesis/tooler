@@ -1,4 +1,6 @@
 use clap::{Parser, Subcommand};
+#[cfg(windows)]
+use std::path::PathBuf;
 
 fn get_version() -> &'static str {
     const BASE_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -142,6 +144,10 @@ pub enum Commands {
 
     /// Show the current version
     Version,
+
+    #[cfg(windows)]
+    #[command(name = "__self-replace", hide = true)]
+    SelfReplace { source: PathBuf, target: PathBuf },
 
     /// Catch-all for running tools directly
     #[command(external_subcommand)]

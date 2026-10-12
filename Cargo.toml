@@ -39,3 +39,6 @@ xz2 = "0.1"
 futures-util = "0.3"
 tempfile = "3.0"
 console = "0.16.2"
+
+[target."cfg(windows)".dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Storage_FileSystem", "Win32_System_Threading"] }

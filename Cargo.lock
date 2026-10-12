@@ -1716,6 +1716,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "walkdir",
+ "windows-sys 0.61.2",
  "xz2",
  "zip",
 ]

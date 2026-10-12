@@ -6,6 +6,8 @@ mod platform;
 mod tool_id;
 mod types;
 
+#[cfg(windows)]
+use anyhow::Context;
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Utc};
 use clap::{CommandFactory, Parser};
@@ -21,6 +23,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(windows)]
+use std::process::Stdio;
 use std::sync::Mutex;
 use tool_id::ToolIdentifier;
 use types::{ReleaseBodyPolicy, ToolerConfig, ToolerSettings};
@@ -29,9 +33,17 @@ use types::{ReleaseBodyPolicy, ToolerConfig, ToolerSettings};
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    #[cfg(windows)]
+    if let Commands::SelfReplace { source, target } = &cli.command {
+        return complete_pending_self_update(source, target);
+    }
+
     // Setup logging
     setup_logging(&cli)?;
     tracing::info!("Logging initialized");
+
+    #[cfg(windows)]
+    cleanup_stale_self_update_helper();
 
     // Load configuration
     let mut config = load_tool_configs()?;
@@ -75,6 +87,8 @@ async fn main() -> Result<()> {
             println!("{} {}", env!("CARGO_PKG_NAME"), version_str);
             return Ok(());
         }
+        #[cfg(windows)]
+        Commands::SelfReplace { .. } => unreachable!("handled before configuration loading"),
         Commands::List => {
             if let Ok(count) = install::recover_all_installed_tools(&mut config) {
                 if count > 0 {
@@ -149,10 +163,10 @@ async fn main() -> Result<()> {
                     tracing::info!("Attempting to update {}...", repo);
                     match install_or_update_tool(&mut config, &repo, true, None, None).await {
                         Ok(path) => {
-                            handle_self_update(&path, &repo)?;
                             let new_version = find_tool_executable(&config, &tool_id)
                                 .map(|t| t.version)
                                 .unwrap_or_else(|| "unknown".to_string());
+                            handle_self_update(&path, &repo, Some(&new_version))?;
                             report_update(&tool_id, old_version.as_deref(), &new_version);
                         }
                         Err(e) => {
@@ -253,10 +267,10 @@ async fn main() -> Result<()> {
             .await
             {
                 Ok(path) => {
-                    handle_self_update(&path, &repo_to_pull)?;
                     let new_version = find_tool_executable(&config, &tool_id)
                         .map(|t| t.version)
                         .unwrap_or_else(|| "unknown".to_string());
+                    handle_self_update(&path, &repo_to_pull, Some(&new_version))?;
                     report_update(&repo_to_pull, old_version.as_deref(), &new_version);
                     tracing::info!("Path: {}", path.display());
                     if config.settings.auto_shim {
@@ -1163,7 +1177,11 @@ fn strip_platform_suffix(name: &str) -> String {
 
 /// Check if a tool identifier refers to tooler itself, and if so, replace the
 /// currently running binary with the newly downloaded one.
-fn handle_self_update(new_executable: &Path, tool_id: &str) -> Result<bool> {
+fn handle_self_update(
+    new_executable: &Path,
+    tool_id: &str,
+    installed_version: Option<&str>,
+) -> Result<bool> {
     let tool_identifier = match ToolIdentifier::parse(tool_id) {
         Ok(id) => id,
         Err(_) => return Ok(false),
@@ -1176,15 +1194,28 @@ fn handle_self_update(new_executable: &Path, tool_id: &str) -> Result<bool> {
         return Ok(false);
     }
 
+    if installed_version.is_some_and(is_current_tooler_version) {
+        tracing::debug!("Self-update: current version is already installed");
+        return Ok(true);
+    }
+
     let current_exe = env::current_exe()?;
+
+    if let (Ok(source), Ok(target)) = (
+        fs::canonicalize(new_executable),
+        fs::canonicalize(&current_exe),
+    ) {
+        if source == target {
+            return Ok(true);
+        }
+    }
+
     tracing::info!(
         "Self-update: replacing {} with {}",
         current_exe.display(),
         new_executable.display()
     );
 
-    // On Unix, we can replace the running binary by writing to a new file and renaming.
-    // The old inode stays alive until the process exits.
     let tmp_path = current_exe.with_extension("new");
     fs::copy(new_executable, &tmp_path)?;
 
@@ -1194,12 +1225,99 @@ fn handle_self_update(new_executable: &Path, tool_id: &str) -> Result<bool> {
         let mut perms = fs::metadata(&tmp_path)?.permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&tmp_path, perms)?;
+        fs::rename(&tmp_path, &current_exe)?;
+        tracing::debug!("Self-update: replaced binary at {}", current_exe.display());
     }
 
-    fs::rename(&tmp_path, &current_exe)?;
-    tracing::debug!("Self-update: replaced binary at {}", current_exe.display());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+
+        let helper_path = current_exe.with_extension("swap.exe");
+        fs::copy(&current_exe, &helper_path).with_context(|| {
+            format!(
+                "Could not create the Windows self-update helper at {}",
+                helper_path.display()
+            )
+        })?;
+
+        Command::new(&helper_path)
+            .arg("__self-replace")
+            .arg(&tmp_path)
+            .arg(&current_exe)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .with_context(|| {
+                format!(
+                    "Could not start the Windows self-update helper from {}",
+                    helper_path.display()
+                )
+            })?;
+
+        tracing::debug!(
+            "Self-update: scheduled replacement of {} after process exit",
+            current_exe.display()
+        );
+    }
 
     Ok(true)
+}
+
+fn is_current_tooler_version(version: &str) -> bool {
+    version.strip_prefix('v').unwrap_or(version) == env!("CARGO_PKG_VERSION")
+}
+
+#[cfg(windows)]
+fn cleanup_stale_self_update_helper() {
+    if let Ok(current_exe) = env::current_exe() {
+        let helper_path = current_exe.with_extension("swap.exe");
+        let _ = fs::remove_file(helper_path);
+    }
+}
+
+#[cfg(windows)]
+fn complete_pending_self_update(source: &Path, target: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use std::thread;
+    use std::time::Duration;
+    use windows_sys::Win32::Storage::FileSystem::ReplaceFileW;
+
+    let target_wide: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
+    let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut last_error = None;
+
+    for _ in 0..200 {
+        let replaced = unsafe {
+            ReplaceFileW(
+                target_wide.as_ptr(),
+                source_wide.as_ptr(),
+                std::ptr::null(),
+                0,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            )
+        };
+
+        if replaced != 0 {
+            return Ok(());
+        }
+
+        let error = io::Error::last_os_error();
+        match error.raw_os_error() {
+            Some(5 | 32 | 1175 | 1176 | 1177) => {
+                last_error = Some(error);
+                thread::sleep(Duration::from_millis(50));
+            }
+            _ => return Err(error).context("Could not replace the Tooler executable"),
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| io::Error::other("replacement timed out")))
+        .context("Timed out waiting for the running Tooler executable to exit")
 }
 
 /// Display a user-friendly error message for GitHub release errors.
@@ -1379,5 +1497,86 @@ mod auto_shim_tests {
                 fs::read(directory.path().join(master)).unwrap()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod self_update_tests {
+    use super::*;
+
+    #[test]
+    fn test_current_tooler_version_accepts_optional_v_prefix() {
+        assert!(is_current_tooler_version(env!("CARGO_PKG_VERSION")));
+        assert!(is_current_tooler_version(&format!(
+            "v{}",
+            env!("CARGO_PKG_VERSION")
+        )));
+        assert!(!is_current_tooler_version("v999.0.0"));
+        assert!(!is_current_tooler_version(&format!(
+            "vv{}",
+            env!("CARGO_PKG_VERSION")
+        )));
+    }
+
+    #[test]
+    fn same_version_self_pull_skips_replacement() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let missing_source = temp_dir.path().join("missing.exe");
+        for tool_id in ["tooler", "morgaesis/tooler"] {
+            assert!(
+                handle_self_update(&missing_source, tool_id, Some(env!("CARGO_PKG_VERSION")))
+                    .unwrap()
+            );
+        }
+        assert!(!handle_self_update(
+            &missing_source,
+            "other/tooler",
+            Some(env!("CARGO_PKG_VERSION"))
+        )
+        .unwrap());
+        assert!(handle_self_update(&missing_source, "morgaesis/tooler", Some("999.0.0")).is_err());
+    }
+    #[cfg(windows)]
+    #[test]
+    fn failed_replacement_preserves_existing_target() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let target = temp_dir.path().join("tooler.exe");
+        fs::write(&target, b"old").unwrap();
+        assert!(complete_pending_self_update(&temp_dir.path().join("missing"), &target).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"old");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn waits_for_a_locked_windows_executable_and_replaces_it() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::thread;
+        use std::time::Duration;
+        use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let target = temp_dir.path().join("tooler.exe");
+        let source = temp_dir.path().join("tooler.new");
+        fs::write(&target, b"old").unwrap();
+        fs::write(&source, b"new").unwrap();
+        let locked_target = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&target)
+            .unwrap();
+        // The synchronous replacement used by self-update fails on a locked image.
+        assert!(fs::rename(&source, &target).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"old");
+        assert_eq!(fs::read(&source).unwrap(), b"new");
+        let unlock = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(150));
+            drop(locked_target);
+        });
+
+        complete_pending_self_update(&source, &target).unwrap();
+        unlock.join().unwrap();
+
+        assert_eq!(fs::read(&target).unwrap(), b"new");
+        assert!(!source.exists());
     }
 }
