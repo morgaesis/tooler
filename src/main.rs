@@ -34,7 +34,15 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     #[cfg(windows)]
-    if let Commands::SelfReplace { source, target } = &cli.command {
+    if let Commands::SelfReplace {
+        source,
+        target,
+        parent_id,
+    } = &cli.command
+    {
+        if let Some(parent_id) = parent_id {
+            wait_for_self_update_parent(*parent_id)?;
+        }
         return complete_pending_self_update(source, target);
     }
 
@@ -1246,6 +1254,8 @@ fn handle_self_update(
             .arg("__self-replace")
             .arg(&tmp_path)
             .arg(&current_exe)
+            .arg("--parent-id")
+            .arg(std::process::id().to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -1276,6 +1286,34 @@ fn cleanup_stale_self_update_helper() {
     if let Ok(current_exe) = env::current_exe() {
         let helper_path = current_exe.with_extension("swap.exe");
         let _ = fs::remove_file(helper_path);
+    }
+}
+
+#[cfg(windows)]
+fn wait_for_self_update_parent(parent_id: u32) -> Result<()> {
+    use windows_sys::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
+
+    let parent = unsafe { OpenProcess(PROCESS_SYNCHRONIZE, 0, parent_id) };
+    if parent.is_null() {
+        let error = io::Error::last_os_error();
+        // The parent can exit before the helper opens its process handle.
+        if error.raw_os_error() == Some(87) {
+            return Ok(());
+        }
+        return Err(error).context("Could not wait for the running Tooler executable");
+    }
+    let result = unsafe { WaitForSingleObject(parent, 10_000) };
+    let error = io::Error::last_os_error();
+    unsafe { CloseHandle(parent) };
+    match result {
+        WAIT_OBJECT_0 => Ok(()),
+        WAIT_TIMEOUT => Err(anyhow!(
+            "Timed out waiting for the running Tooler executable to exit"
+        )),
+        _ => Err(error).context("Could not wait for the running Tooler executable"),
     }
 }
 
@@ -1536,6 +1574,29 @@ mod self_update_tests {
         .unwrap());
         assert!(handle_self_update(&missing_source, "morgaesis/tooler", Some("999.0.0")).is_err());
     }
+    #[cfg(windows)]
+    #[test]
+    fn waits_for_parent_process_to_exit() {
+        if env::var_os("TOOLER_SELF_UPDATE_TEST_CHILD").is_some() {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            return;
+        }
+        let mut parent = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "self_update_tests::waits_for_parent_process_to_exit",
+            ])
+            .env("TOOLER_SELF_UPDATE_TEST_CHILD", "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        wait_for_self_update_parent(parent.id()).unwrap();
+        assert!(parent.try_wait().unwrap().unwrap().success());
+        // An exited parent also permits replacement immediately.
+        wait_for_self_update_parent(parent.id()).unwrap();
+    }
+
     #[cfg(windows)]
     #[test]
     fn failed_replacement_preserves_existing_target() {
