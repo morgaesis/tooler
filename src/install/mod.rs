@@ -577,6 +577,14 @@ fn restore_configured_entry(
 }
 
 pub fn pin_tool(config: &mut ToolerConfig, tool_id: &str) -> Result<()> {
+    pin_tool_with_persistence(config, tool_id, save_tool_configs)
+}
+
+fn pin_tool_with_persistence(
+    config: &mut ToolerConfig,
+    tool_id: &str,
+    persist: impl FnOnce(&ToolerConfig) -> Result<()>,
+) -> Result<()> {
     let tool_identifier = ToolIdentifier::parse(tool_id).map_err(|e| anyhow!(e))?;
     if tool_identifier.version.is_none() {
         return Err(anyhow!(
@@ -599,7 +607,7 @@ pub fn pin_tool(config: &mut ToolerConfig, tool_id: &str) -> Result<()> {
             config.tools.insert(latest_key, latest_tool);
         }
 
-        save_tool_configs(config)?;
+        persist(config)?;
         tracing::info!("Tool {} pinned to version {}", tool_id, version);
         Ok(())
     } else {
@@ -1428,7 +1436,6 @@ mod tests {
 
         let temp_dir = TempDir::new().unwrap();
         let config_path = temp_dir.path().join("config.json");
-        std::env::set_var("TOOLER_CONFIG_PATH", &config_path);
 
         let now = Utc::now().to_rfc3339();
         let mut config = ToolerConfig::default();
@@ -1457,7 +1464,10 @@ mod tests {
             .insert("owner/test@latest".to_string(), tool_info.clone());
 
         // Test pinning the tool
-        assert!(pin_tool(&mut config, "owner/test@1.0.0").is_ok());
+        pin_tool_with_persistence(&mut config, "owner/test@1.0.0", |config| {
+            crate::config::save_tool_configs_to_path(config, &config_path)
+        })
+        .unwrap();
 
         // Verify pinned status
         let pinned_tool = config.tools.get("owner/test@1.0.0").unwrap();
@@ -1468,7 +1478,11 @@ mod tests {
         assert!(latest_tool.pinned);
         assert_eq!(latest_tool.version, "1.0.0");
 
-        std::env::remove_var("TOOLER_CONFIG_PATH");
+        let persisted: ToolerConfig =
+            serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+        assert!(persisted.tools["owner/test@1.0.0"].pinned);
+        assert!(persisted.tools["owner/test@latest"].pinned);
+        assert_eq!(persisted.tools["owner/test@latest"].version, "1.0.0");
     }
 
     #[test]

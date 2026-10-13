@@ -62,9 +62,15 @@ pub fn get_tooler_tools_dir() -> Result<PathBuf> {
 
 pub fn load_tool_configs() -> Result<ToolerConfig> {
     let config_path = get_tooler_config_file_path()?;
+    load_tool_configs_from_path(&config_path, |name| std::env::var(name).ok())
+}
 
+fn load_tool_configs_from_path(
+    config_path: &std::path::Path,
+    environment: impl Fn(&str) -> Option<String>,
+) -> Result<ToolerConfig> {
     let mut config = if config_path.exists() {
-        let content = fs::read_to_string(&config_path)
+        let content = fs::read_to_string(config_path)
             .with_context(|| format!("Could not read config file at {}", config_path.display()))?;
 
         if content.trim().is_empty() {
@@ -102,33 +108,36 @@ pub fn load_tool_configs() -> Result<ToolerConfig> {
         ToolerConfig::default()
     };
 
-    apply_environment_overrides(&mut config);
+    apply_environment_overrides(&mut config, environment);
 
     Ok(config)
 }
 
-fn apply_environment_overrides(config: &mut ToolerConfig) {
-    if let Ok(days) = std::env::var("TOOLER_UPDATE_CHECK_DAYS") {
+fn apply_environment_overrides(
+    config: &mut ToolerConfig,
+    environment: impl Fn(&str) -> Option<String>,
+) {
+    if let Some(days) = environment("TOOLER_UPDATE_CHECK_DAYS") {
         if let Ok(days) = days.parse::<i32>() {
             config.settings.update_check_days = days;
         }
     }
 
-    if let Ok(auto_shim) = std::env::var("TOOLER_AUTO_SHIM") {
+    if let Some(auto_shim) = environment("TOOLER_AUTO_SHIM") {
         config.settings.auto_shim = auto_shim.to_lowercase() == "true" || auto_shim == "1";
     }
 
-    if let Ok(auto_update) = std::env::var("TOOLER_AUTO_UPDATE") {
+    if let Some(auto_update) = environment("TOOLER_AUTO_UPDATE") {
         config.settings.auto_update = auto_update.to_lowercase() == "true" || auto_update == "1";
     }
 
-    if let Ok(parse_release_body) = std::env::var("TOOLER_PARSE_RELEASE_BODY") {
+    if let Some(parse_release_body) = environment("TOOLER_PARSE_RELEASE_BODY") {
         if let Some(policy) = ReleaseBodyPolicy::parse(&parse_release_body) {
             config.settings.parse_release_body = policy;
         }
     }
 
-    if let Ok(bin_dir) = std::env::var("TOOLER_BIN_DIR") {
+    if let Some(bin_dir) = environment("TOOLER_BIN_DIR") {
         config.settings.bin_dir = bin_dir;
     }
 }
@@ -271,32 +280,70 @@ mod tests {
         let config_path = temp_dir.path().join("config").join("config.json");
         let bin_dir = temp_dir.path().join("bin");
 
-        let old_config = std::env::var("TOOLER_CONFIG").ok();
-        let old_config_path = std::env::var("TOOLER_CONFIG_PATH").ok();
-        let old_bin_dir = std::env::var("TOOLER_BIN_DIR").ok();
-
-        std::env::set_var("TOOLER_CONFIG", &config_path);
-        std::env::remove_var("TOOLER_CONFIG_PATH");
-        std::env::set_var("TOOLER_BIN_DIR", &bin_dir);
-
-        let config = load_tool_configs().unwrap();
+        let config = load_tool_configs_from_path(&config_path, |name| {
+            (name == "TOOLER_BIN_DIR").then(|| bin_dir.to_string_lossy().into_owned())
+        })
+        .unwrap();
         assert_eq!(config.settings.bin_dir, bin_dir.to_string_lossy());
+        assert!(!config_path.exists());
+    }
 
-        if let Some(value) = old_config {
-            std::env::set_var("TOOLER_CONFIG", value);
-        } else {
-            std::env::remove_var("TOOLER_CONFIG");
-        }
-        if let Some(value) = old_config_path {
-            std::env::set_var("TOOLER_CONFIG_PATH", value);
-        } else {
-            std::env::remove_var("TOOLER_CONFIG_PATH");
-        }
-        if let Some(value) = old_bin_dir {
-            std::env::set_var("TOOLER_BIN_DIR", value);
-        } else {
-            std::env::remove_var("TOOLER_BIN_DIR");
-        }
+    #[test]
+    fn test_environment_overrides() {
+        let mut config = ToolerConfig::default();
+        apply_environment_overrides(&mut config, |name| {
+            match name {
+                "TOOLER_UPDATE_CHECK_DAYS" => Some("7"),
+                "TOOLER_AUTO_SHIM" => Some("false"),
+                "TOOLER_AUTO_UPDATE" => Some("TRUE"),
+                "TOOLER_PARSE_RELEASE_BODY" => Some("never"),
+                "TOOLER_BIN_DIR" => Some("custom-bin"),
+                _ => None,
+            }
+            .map(str::to_owned)
+        });
+        assert_eq!(config.settings.update_check_days, 7);
+        assert!(!config.settings.auto_shim);
+        assert!(config.settings.auto_update);
+        assert_eq!(config.settings.parse_release_body, ReleaseBodyPolicy::Never);
+        assert_eq!(config.settings.bin_dir, "custom-bin");
+
+        apply_environment_overrides(&mut config, |name| {
+            matches!(
+                name,
+                "TOOLER_UPDATE_CHECK_DAYS" | "TOOLER_PARSE_RELEASE_BODY"
+            )
+            .then(|| "invalid".to_owned())
+        });
+        assert_eq!(config.settings.update_check_days, 7);
+        assert_eq!(config.settings.parse_release_body, ReleaseBodyPolicy::Never);
+        assert_eq!(config.settings.bin_dir, "custom-bin");
+    }
+
+    #[test]
+    fn test_explicit_config_paths_are_independent() {
+        let directory = tempfile::tempdir().unwrap();
+        let sentinel_path = directory.path().join("caller.json");
+        let sentinel = b"caller config must remain unchanged";
+        fs::write(&sentinel_path, sentinel).unwrap();
+        std::thread::scope(|scope| {
+            for days in [3, 9] {
+                let path = directory.path().join(format!("{days}/config.json"));
+                scope.spawn(move || {
+                    let mut config = ToolerConfig::default();
+                    config.settings.update_check_days = days;
+                    save_tool_configs_to_path(&config, &path).unwrap();
+                    let loaded = load_tool_configs_from_path(&path, |_| None).unwrap();
+                    assert_eq!(loaded.settings.update_check_days, days);
+                    let overridden = load_tool_configs_from_path(&path, |name| {
+                        (name == "TOOLER_UPDATE_CHECK_DAYS").then(|| "15".to_owned())
+                    })
+                    .unwrap();
+                    assert_eq!(overridden.settings.update_check_days, 15);
+                });
+            }
+        });
+        assert_eq!(fs::read(&sentinel_path).unwrap(), sentinel);
     }
 
     #[test]
