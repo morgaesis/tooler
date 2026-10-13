@@ -342,6 +342,16 @@ fn unix_assets_and_installation_paths() {
 }
 
 #[cfg(windows)]
+fn powershell_architecture_block(installer: &str) -> String {
+    installer
+        .replace("\r\n", "\n")
+        .split_once("\nif ($ToolerVersion) {\n    $tag = $ToolerVersion")
+        .expect("PowerShell installer architecture block must precede release resolution")
+        .0
+        .to_string()
+}
+
+#[cfg(windows)]
 #[test]
 fn powershell_native_architecture_selection() {
     let root = TempDir::new().unwrap();
@@ -349,9 +359,9 @@ fn powershell_native_architecture_selection() {
         fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("install.ps1"))
             .unwrap();
     // Exercise the real selection block without downloads or configuration writes.
-    let (detection, _) = installer
-        .split_once("\nif ($ToolerVersion) {\n    $tag = $ToolerVersion")
-        .expect("PowerShell installer architecture block must precede release resolution");
+    let detection = powershell_architecture_block(&installer);
+    let crlf_installer = installer.replace("\r\n", "\n").replace('\n', "\r\n");
+    assert_eq!(powershell_architecture_block(&crlf_installer), detection);
     for (machine, expected) in [
         ("X64", Some("x86_64")),
         ("Arm64", Some("aarch64")),
